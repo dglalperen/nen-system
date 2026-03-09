@@ -1,0 +1,24 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "configure (dev)",
+      "type": "shell",
+      "command": "cmake --preset dev",
+      "group": "build"
+    },
+    {
+      "label": "build (dev)",
+      "type": "shell",
+      "command": "cmake --build --preset dev",
+      "group": "build",
+      "dependsOn": "configure (dev)"
+    },
+    {
+      "label": "run (dev)",
+      "type": "shell",
+      "command": "${workspaceFolder}/build/dev/nen_world",
+      "dependsOn": "build (dev)"
+    }
+  ]
+}

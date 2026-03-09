@@ -1,0 +1,86 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "NEN_BUILD_TESTS": "ON",
+        "NEN_ENABLE_CLANG_TIDY": "OFF"
+      }
+    },
+    {
+      "name": "dev",
+      "inherits": "base",
+      "displayName": "Development (Debug)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NEN_ENABLE_SANITIZERS": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "inherits": "base",
+      "displayName": "Release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "NEN_ENABLE_SANITIZERS": "OFF"
+      }
+    },
+    {
+      "name": "dev-no-sanitizers",
+      "inherits": "base",
+      "displayName": "Development (Debug, no sanitizers)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NEN_ENABLE_SANITIZERS": "OFF"
+      }
+    },
+    {
+      "name": "dev-lint",
+      "inherits": "dev",
+      "displayName": "Development (Debug, clang-tidy on)",
+      "cacheVariables": {
+        "NEN_ENABLE_CLANG_TIDY": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "dev-lint",
+      "configurePreset": "dev-lint"
+    },
+    {
+      "name": "tests",
+      "configurePreset": "dev",
+      "targets": [
+        "nen_tests"
+      ]
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
