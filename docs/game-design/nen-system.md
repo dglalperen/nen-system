@@ -9,12 +9,17 @@ Prototype a simplified Nen training sandbox that supports experimentation and fu
 - Character has:
   - `naturalType`
   - `auraPool`
+- New characters are assigned a natural type using a personality quiz.
+- Reveal uses a water divination scene tied to the resulting type.
 - Affinity efficiency by ring distance:
   - same: 100%
   - adjacent: 80%
   - two steps away: 60%
   - opposite: 40%
 - Training in a zone grants aura based on efficiency.
+- Combat uses a type modifier:
+  - same type attacks are strongest
+  - farther types are progressively weaker
 
 ## Why This Simplification
 

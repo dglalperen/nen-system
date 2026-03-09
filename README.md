@@ -35,10 +35,16 @@ cmake --build --preset dev
 
 Controls:
 
-- `WASD` or arrow keys: move
-- `E`: train in active zone
-- `1-6`: switch natural Nen type
+- Main menu: create new character or load existing save
+- New character flow: enter name -> answer personality quiz -> water divination reveal
+- `WASD` or arrow keys: move in world
+- `E`: train in active zone (gains aura based on Nen efficiency)
+- `1-6`: choose attack Nen type
+- `SPACE`: attack training dummy (damage scales by type modifier)
+- `F5`: manual save
 - `ESC`: quit
+
+Saved characters are stored in `~/.nen_world/characters`.
 
 ## Tests
 
@@ -84,10 +90,11 @@ cmake --build --preset dev-lint
 
 This is currently a Tier 1 prototype:
 
-- interactive 2D world
-- Nen affinity mechanics
-- training loop
-- basic HUD
+- interactive 2D world with state-driven UI flow
+- character create/load persistence
+- personality-based Nen type assignment + water divination reveal
+- Nen affinity training loop (`E`)
+- type-scaled combat damage modifiers (`SPACE`)
 
 Next milestone is Tier 2:
 
