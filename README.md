@@ -40,7 +40,7 @@ Controls:
 - `WASD` or arrow keys: move in world
 - `E`: train in active zone (gains aura based on Nen efficiency)
 - `1-6`: choose attack Nen type
-- `SPACE`: attack training dummy (damage scales by type modifier)
+- `SPACE`: cast animated aura attacks at dummy (visuals + behavior vary by Nen type)
 - `F5`: manual save
 - `ESC`: quit
 

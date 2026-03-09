@@ -9,6 +9,7 @@
 
 #include <raylib.h>
 
+#include "game/attack_system.hpp"
 #include "game/persistence.hpp"
 #include "nen/affinity.hpp"
 #include "nen/combat.hpp"
@@ -23,8 +24,8 @@ namespace {
 constexpr int kWidth = 1100;
 constexpr int kHeight = 640;
 constexpr int kDummyMaxHealth = 220;
-constexpr int kAttackAuraCost = 12;
-constexpr int kAttackBasePower = 24;
+constexpr int kAttackAuraCost = 16;
+constexpr int kAttackBasePower = 28;
 
 enum class Screen {
     MainMenu,
@@ -64,6 +65,10 @@ struct AppState {
     Vector2 playerSize{20.0F, 20.0F};
     nen::Type selectedAttackType = nen::Type::Enhancer;
 
+    std::vector<AttackEffect> activeAttacks;
+    float attackCooldown = 0.0F;
+    Vector2 dummyCenter{845.0F, 445.0F};
+    float dummyRadius = 38.0F;
     int dummyHealth = kDummyMaxHealth;
     int activeZoneIndex = -1;
     std::string statusMessage = "Select New Character or Load Character.";
@@ -139,10 +144,13 @@ void StartWorld(AppState *app, const nen::Character &character) {
     app->player = character;
     app->hasCharacter = true;
     app->selectedAttackType = character.naturalType;
-    app->playerPosition = {520.0F, 520.0F};
+    app->playerPosition = {560.0F, 520.0F};
     app->dummyHealth = kDummyMaxHealth;
     app->activeZoneIndex = -1;
-    app->statusMessage = "Move with WASD. E trains aura in a zone. SPACE attacks the dummy.";
+    app->activeAttacks.clear();
+    app->attackCooldown = 0.0F;
+    app->statusMessage =
+        "Move with WASD. E trains aura in a zone. SPACE casts animated Nen attack.";
 }
 
 void UpdateMainMenu(AppState *app) {
@@ -315,6 +323,7 @@ void UpdateMovement(AppState *app, float dt) {
 void UpdateWorld(AppState *app, float dt, const std::array<TrainingZone, 6> &zones) {
     UpdateAttackTypeHotkeys(app);
     UpdateMovement(app, dt);
+    app->attackCooldown = std::max(0.0F, app->attackCooldown - dt);
 
     const Rectangle playerRect{app->playerPosition.x, app->playerPosition.y, app->playerSize.x,
                                app->playerSize.y};
@@ -337,29 +346,44 @@ void UpdateWorld(AppState *app, float dt, const std::array<TrainingZone, 6> &zon
         SaveCurrentCharacter(app);
     }
 
+    const int frameDamage =
+        UpdateAttackEffects(&app->activeAttacks, dt, app->dummyCenter, app->dummyRadius);
+    if (frameDamage > 0) {
+        app->dummyHealth = std::max(0, app->dummyHealth - frameDamage);
+        app->statusMessage = std::string(nen::ToString(app->selectedAttackType)) +
+                             " aura attack connected for " + std::to_string(frameDamage) +
+                             " damage.";
+
+        if (app->dummyHealth == 0) {
+            app->dummyHealth = kDummyMaxHealth;
+            app->player.auraPool = std::min(2200, app->player.auraPool + 24);
+            app->statusMessage += " Dummy broken. +24 aura reward.";
+        }
+        SaveCurrentCharacter(app);
+    }
+
     if (IsKeyPressed(KEY_SPACE)) {
+        if (app->attackCooldown > 0.0F) {
+            app->statusMessage = "Attack is recharging...";
+            return;
+        }
+
         if (!nen::TryConsumeAura(&app->player, kAttackAuraCost)) {
             app->statusMessage =
                 "Not enough aura for attack. Need " + std::to_string(kAttackAuraCost) + ".";
             return;
         }
 
+        const Vector2 origin{app->playerPosition.x + app->playerSize.x * 0.5F,
+                             app->playerPosition.y + app->playerSize.y * 0.5F};
         const int damage = nen::ComputeAttackDamage(app->player.naturalType,
                                                     app->selectedAttackType, kAttackBasePower);
-        app->dummyHealth = std::max(0, app->dummyHealth - damage);
-
-        if (app->dummyHealth == 0) {
-            app->dummyHealth = kDummyMaxHealth;
-            app->player.auraPool = std::min(2200, app->player.auraPool + 20);
-            app->statusMessage = "Dummy defeated with " +
-                                 std::string(nen::ToString(app->selectedAttackType)) + " attack (" +
-                                 std::to_string(damage) + " dmg). +20 aura reward.";
-        } else {
-            const double modifier =
-                nen::DamageModifier(app->player.naturalType, app->selectedAttackType);
-            app->statusMessage = "Hit for " + std::to_string(damage) + " damage, modifier x" +
-                                 std::to_string(static_cast<float>(modifier)) + ".";
-        }
+        SpawnAttackEffect(&app->activeAttacks, app->selectedAttackType, origin, app->dummyCenter,
+                          damage);
+        app->attackCooldown = 0.22F;
+        app->statusMessage = std::string("Cast ") +
+                             std::string(nen::ToString(app->selectedAttackType)) +
+                             " aura attack. Cost -" + std::to_string(kAttackAuraCost) + " aura.";
         SaveCurrentCharacter(app);
     }
 
@@ -435,58 +459,103 @@ void DrawQuiz(const AppState &app) {
 }
 
 void DrawReveal(const AppState &app) {
+    DrawRectangleGradientV(0, 0, kWidth, kHeight, {18, 27, 46, 255}, {10, 18, 33, 255});
     DrawText("Water Divination", 64, 54, 46, RAYWHITE);
     DrawText("Your aura has been measured.", 64, 116, 24, LIGHTGRAY);
 
     DrawText(TextFormat("%s is a %s!", app.player.name.c_str(),
                         nen::ToString(app.player.naturalType).data()),
-             64, 168, 38, WHITE);
-    DrawText(nen::WaterDivinationEffect(app.player.naturalType).data(), 64, 220, 24, LIGHTGRAY);
+             64, 168, 40, WHITE);
+    DrawText(nen::WaterDivinationEffect(app.player.naturalType).data(), 64, 226, 24, LIGHTGRAY);
 
-    const Rectangle glass{760.0F, 170.0F, 200.0F, 280.0F};
-    DrawRectangleLinesEx(glass, 3.0F, WHITE);
-    DrawRectangle(static_cast<int>(glass.x + 12.0F), static_cast<int>(glass.y + 12.0F),
-                  static_cast<int>(glass.width - 24.0F), static_cast<int>(glass.height - 24.0F),
-                  {17, 31, 62, 255});
+    const Rectangle glass{750.0F, 158.0F, 220.0F, 312.0F};
+    DrawRectangleRounded(glass, 0.04F, 6, Fade({46, 68, 112, 255}, 0.4F));
+    DrawRectangleRoundedLinesEx(glass, 0.04F, 6, 4.0F, WHITE);
 
-    float waterLevel = 120.0F;
-    Color waterColor = {65, 130, 255, 255};
-    int leafOffset = 0;
-    int impurityCount = 0;
+    float waterLevel = 132.0F;
+    Color waterBase = {73, 136, 236, 255};
+    Color glowColor = {128, 179, 255, 255};
+    float leafOffset = std::sin(app.revealTimer * 2.5F) * 28.0F;
 
     switch (app.player.naturalType) {
     case nen::Type::Enhancer:
-        waterLevel = 120.0F + std::min(120.0F, app.revealTimer * 70.0F);
+        waterLevel = 132.0F + std::min(130.0F, app.revealTimer * 72.0F);
+        glowColor = {166, 236, 158, 255};
         break;
     case nen::Type::Transmuter:
-        waterColor = {113, 201, 218, 255};
+        waterBase = {98, 216, 255, 255};
+        glowColor = {188, 255, 250, 255};
         break;
     case nen::Type::Emitter:
-        waterColor = {131, 148, 255, 255};
+        waterBase = {144, 124, 255, 255};
+        glowColor = {218, 149, 255, 255};
         break;
     case nen::Type::Conjurer:
-        impurityCount = 8;
+        waterBase = {95, 138, 236, 255};
+        glowColor = {198, 170, 255, 255};
         break;
     case nen::Type::Manipulator:
-        leafOffset = static_cast<int>(std::sin(app.revealTimer * 3.0F) * 35.0F);
+        waterBase = {99, 170, 228, 255};
+        glowColor = {232, 229, 171, 255};
         break;
     case nen::Type::Specialist:
-        impurityCount = 12;
-        waterColor = {170, 107, 232, 255};
+        waterBase = {171, 105, 234, 255};
+        glowColor = {255, 154, 221, 255};
         break;
     }
 
-    DrawRectangle(static_cast<int>(glass.x + 12.0F),
-                  static_cast<int>(glass.y + glass.height - waterLevel - 12.0F),
-                  static_cast<int>(glass.width - 24.0F), static_cast<int>(waterLevel), waterColor);
+    const Rectangle waterArea{
+        glass.x + 14.0F,
+        glass.y + glass.height - waterLevel - 14.0F,
+        glass.width - 28.0F,
+        waterLevel,
+    };
+    DrawRectangleRounded(waterArea, 0.05F, 5, waterBase);
+    DrawRectangleRounded(waterArea, 0.05F, 5, Fade(glowColor, 0.16F));
 
-    DrawRectangle(static_cast<int>(glass.x + 82.0F + static_cast<float>(leafOffset)),
-                  static_cast<int>(glass.y + 88.0F), 28, 10, {198, 230, 169, 255});
+    const int waveSteps = 16;
+    for (int i = 0; i < waveSteps; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(waveSteps - 1);
+        const float x = waterArea.x + t * waterArea.width;
+        const float y = waterArea.y + std::sin(t * 8.5F + app.revealTimer * 5.0F) * 5.0F;
+        DrawCircle(static_cast<int>(x), static_cast<int>(y), 2.2F, Fade(WHITE, 0.9F));
+    }
 
-    for (int i = 0; i < impurityCount; ++i) {
-        const int x = static_cast<int>(glass.x + 24.0F + static_cast<float>((i * 19) % 120));
-        const int y = static_cast<int>(glass.y + 180.0F + static_cast<float>((i * 23) % 120));
-        DrawCircle(x, y, 2.5F, Fade(WHITE, 0.75F));
+    DrawRectangle(static_cast<int>(glass.x + 96.0F + leafOffset), static_cast<int>(glass.y + 92.0F),
+                  34, 12, {198, 230, 169, 255});
+
+    switch (app.player.naturalType) {
+    case nen::Type::Enhancer:
+        DrawRectangle(static_cast<int>(waterArea.x + 4.0F), static_cast<int>(waterArea.y - 16.0F),
+                      static_cast<int>(waterArea.width - 8.0F), 14, Fade(glowColor, 0.6F));
+        break;
+    case nen::Type::Transmuter:
+        DrawLineEx({waterArea.x + 24.0F, waterArea.y + 30.0F},
+                   {waterArea.x + 98.0F, waterArea.y + 66.0F}, 3.0F, glowColor);
+        DrawLineEx({waterArea.x + 98.0F, waterArea.y + 66.0F},
+                   {waterArea.x + 62.0F, waterArea.y + 90.0F}, 3.0F, glowColor);
+        break;
+    case nen::Type::Emitter:
+        DrawRing({glass.x + glass.width * 0.5F, waterArea.y + 54.0F}, 16.0F, 32.0F, 0.0F, 360.0F,
+                 42, Fade(glowColor, 0.75F));
+        break;
+    case nen::Type::Conjurer:
+        for (int i = 0; i < 5; ++i) {
+            const float px = waterArea.x + 26.0F + static_cast<float>(i) * 32.0F;
+            const float py = waterArea.y + 38.0F + std::sin(app.revealTimer * 2.0F + i) * 8.0F;
+            DrawPoly({px, py}, 4, 6.0F, 45.0F, Fade(glowColor, 0.85F));
+        }
+        break;
+    case nen::Type::Manipulator:
+        DrawLineBezier({waterArea.x + 34.0F, waterArea.y + 30.0F},
+                       {waterArea.x + waterArea.width - 40.0F, waterArea.y + 64.0F}, 2.5F,
+                       Fade(glowColor, 0.85F));
+        break;
+    case nen::Type::Specialist:
+        DrawPoly({glass.x + glass.width * 0.5F, waterArea.y + 52.0F}, 7, 24.0F,
+                 app.revealTimer * 72.0F, Fade(glowColor, 0.8F));
+        DrawCircle(glass.x + glass.width * 0.5F, waterArea.y + 52.0F, 10.0F, Fade(WHITE, 0.7F));
+        break;
     }
 
     DrawText("Press ENTER to continue", 64, 520, 24, LIGHTGRAY);
@@ -499,9 +568,9 @@ void DrawWorld(const AppState &app, const std::array<TrainingZone, 6> &zones) {
 
     DrawRectangle(0, 0, kWidth, 88, {24, 34, 53, 255});
     DrawText("Nen World - Phase 2 Prototype", 24, 18, 34, RAYWHITE);
-    DrawText(
-        "E: train in zone | 1-6: choose attack type | SPACE: attack dummy | F5: save | ESC: quit",
-        24, 56, 18, LIGHTGRAY);
+    DrawText("E: train in zone | 1-6: choose attack type | SPACE: cast animated aura attack | F5: "
+             "save | ESC: quit",
+             24, 56, 18, LIGHTGRAY);
 
     for (std::size_t i = 0; i < zones.size(); ++i) {
         const auto &zone = zones[i];
@@ -519,7 +588,11 @@ void DrawWorld(const AppState &app, const std::array<TrainingZone, 6> &zones) {
                  {10, 15, 24, 255});
     }
 
+    DrawAttackEffects(app.activeAttacks);
     DrawRectangleRec(playerRect, {243, 242, 228, 255});
+    DrawCircleV(app.dummyCenter, app.dummyRadius, {124, 68, 68, 255});
+    DrawCircleLinesV(app.dummyCenter, app.dummyRadius + 2.0F, Fade(WHITE, 0.8F));
+    DrawCircleV(app.dummyCenter, app.dummyRadius * 0.62F, {186, 92, 92, 255});
 
     DrawText(TextFormat("Name: %s", app.player.name.c_str()), 650, 150, 24, RAYWHITE);
     DrawText(TextFormat("Natural Type: %s", nen::ToString(app.player.naturalType).data()), 650, 184,
@@ -531,23 +604,24 @@ void DrawWorld(const AppState &app, const std::array<TrainingZone, 6> &zones) {
                         static_cast<float>(
                             nen::DamageModifier(app.player.naturalType, app.selectedAttackType))),
              650, 286, 24, LIGHTGRAY);
+    DrawText(TextFormat("Cooldown: %.2fs", app.attackCooldown), 650, 314, 20, LIGHTGRAY);
 
-    DrawText("Starter Plan", 650, 336, 24, RAYWHITE);
-    DrawText(TextFormat("1) %s", nen::ToString(starterPlan.focusOrder[0].type).data()), 650, 368,
+    DrawText("Starter Plan", 650, 344, 24, RAYWHITE);
+    DrawText(TextFormat("1) %s", nen::ToString(starterPlan.focusOrder[0].type).data()), 650, 376,
              20, LIGHTGRAY);
-    DrawText(TextFormat("2) %s", nen::ToString(starterPlan.focusOrder[1].type).data()), 650, 396,
+    DrawText(TextFormat("2) %s", nen::ToString(starterPlan.focusOrder[1].type).data()), 650, 404,
              20, LIGHTGRAY);
-    DrawText(TextFormat("3) %s", nen::ToString(starterPlan.focusOrder[2].type).data()), 650, 424,
+    DrawText(TextFormat("3) %s", nen::ToString(starterPlan.focusOrder[2].type).data()), 650, 432,
              20, LIGHTGRAY);
 
-    DrawRectangle(740, 458, 260, 120, {23, 32, 49, 255});
-    DrawRectangleLines(740, 458, 260, 120, Fade(WHITE, 0.7F));
-    DrawText("Training Dummy", 760, 476, 22, RAYWHITE);
-    DrawRectangle(760, 510, 220, 18, {53, 68, 94, 255});
-    const int hpBarWidth = static_cast<int>((220.0F * static_cast<float>(app.dummyHealth)) /
+    DrawRectangle(720, 470, 290, 110, {23, 32, 49, 255});
+    DrawRectangleLines(720, 470, 290, 110, Fade(WHITE, 0.7F));
+    DrawText("Training Dummy", 744, 488, 22, RAYWHITE);
+    DrawRectangle(744, 522, 240, 18, {53, 68, 94, 255});
+    const int hpBarWidth = static_cast<int>((240.0F * static_cast<float>(app.dummyHealth)) /
                                             static_cast<float>(kDummyMaxHealth));
-    DrawRectangle(760, 510, hpBarWidth, 18, {224, 83, 83, 255});
-    DrawText(TextFormat("%d / %d HP", app.dummyHealth, kDummyMaxHealth), 760, 535, 18, LIGHTGRAY);
+    DrawRectangle(744, 522, hpBarWidth, 18, {224, 83, 83, 255});
+    DrawText(TextFormat("%d / %d HP", app.dummyHealth, kDummyMaxHealth), 744, 548, 18, LIGHTGRAY);
 }
 
 } // namespace

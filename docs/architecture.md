@@ -21,7 +21,7 @@ Build a maintainable Nen sandbox game with clear boundaries between domain logic
 ## Current Module Map
 
 - `include/nen`, `src/nen`: Nen domain (`affinity`, `training`, `quiz`, `combat`)
-- `include/game`, `src/game`: 2D runtime and persistence
+- `include/game`, `src/game`: 2D runtime, persistence, and animated attack system
 - `tests/`: fast unit tests for domain behaviors
 
 ## Quality Gates

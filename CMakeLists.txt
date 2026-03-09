@@ -40,14 +40,14 @@ function(nen_enable_sanitizers target_name)
 endfunction()
 
 add_library(nen_core
-        src/nen/affinity.cpp
-        src/nen/combat.cpp
-        src/nen/quiz.cpp
-        src/nen/training.cpp
+    src/nen/affinity.cpp
+    src/nen/combat.cpp
+    src/nen/quiz.cpp
+    src/nen/training.cpp
 )
 
 target_include_directories(nen_core
-        PUBLIC
+    PUBLIC
         ${PROJECT_SOURCE_DIR}/include
 )
 
@@ -55,9 +55,11 @@ nen_apply_warnings(nen_core)
 nen_enable_sanitizers(nen_core)
 
 add_library(nen_game
-        src/game/game.cpp
-        src/game/persistence.cpp
+    src/game/attack_system.cpp
+    src/game/game.cpp
+    src/game/persistence.cpp
 )
+
 target_link_libraries(nen_game PUBLIC nen_core raylib)
 target_include_directories(nen_game PUBLIC ${PROJECT_SOURCE_DIR}/include)
 nen_apply_warnings(nen_game)
