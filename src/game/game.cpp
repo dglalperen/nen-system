@@ -30,6 +30,7 @@ constexpr int kHatsuAuraCost = 52;
 constexpr int kBaseAttackPower = 25;
 constexpr int kHatsuAttackPower = 44;
 constexpr float kWorldScale = 0.035F;
+constexpr float kPlayerModelTargetHeight = 1.18F;
 
 constexpr float kSidebarMargin = 28.0F;
 constexpr float kSidebarTop = 88.0F;
@@ -79,6 +80,7 @@ struct AppState {
     bool hasCharacter = false;
     Vector2 playerPosition{kArenaBounds.x + 110.0F, kArenaBounds.y + kArenaBounds.height - 130.0F};
     Vector2 playerSize{36.0F, 52.0F};
+    Vector2 facingDirection{0.0F, -1.0F};
     bool chargingAura = false;
     float chargeEffectTimer = 0.0F;
     nen::Type selectedBaseType = nen::Type::Enhancer;
@@ -353,6 +355,31 @@ std::string ResolveCharacterModelPath() {
     return {};
 }
 
+BoundingBox MergeBounds(const BoundingBox &a, const BoundingBox &b) {
+    return {
+        {std::min(a.min.x, b.min.x), std::min(a.min.y, b.min.y), std::min(a.min.z, b.min.z)},
+        {std::max(a.max.x, b.max.x), std::max(a.max.y, b.max.y), std::max(a.max.z, b.max.z)},
+    };
+}
+
+bool IsUsableMeshBounds(const BoundingBox &bounds, int vertexCount) {
+    if (vertexCount < 24) {
+        return false;
+    }
+    const float w = bounds.max.x - bounds.min.x;
+    const float h = bounds.max.y - bounds.min.y;
+    const float d = bounds.max.z - bounds.min.z;
+    if (w <= 0.001F || h <= 0.001F || d <= 0.001F) {
+        return false;
+    }
+    const float longest = std::max({w, h, d});
+    const float shortest = std::max(0.0001F, std::min({w, h, d}));
+    if (longest / shortest > 65.0F && vertexCount < 120) {
+        return false;
+    }
+    return longest < 25000.0F;
+}
+
 void TryLoadPlayerModel(AppState *app) {
     if (app == nullptr) {
         return;
@@ -373,46 +400,56 @@ void TryLoadPlayerModel(AppState *app) {
         return;
     }
 
-    bool hasDiffuseTexture = false;
+    bool hasRenderableTexture = false;
+    int whiteMaterialCount = 0;
     for (int i = 0; i < model.materialCount; ++i) {
-        if (model.materials[i].maps[MATERIAL_MAP_DIFFUSE].texture.id > 0) {
-            hasDiffuseTexture = true;
-            break;
+        const Texture2D tex = model.materials[i].maps[MATERIAL_MAP_DIFFUSE].texture;
+        if (tex.id > 0 && tex.width > 1 && tex.height > 1) {
+            hasRenderableTexture = true;
+        }
+        const Color c = model.materials[i].maps[MATERIAL_MAP_DIFFUSE].color;
+        if (c.r >= 245 && c.g >= 245 && c.b >= 245) {
+            whiteMaterialCount += 1;
         }
     }
 
-    if (!hasDiffuseTexture) {
+    const bool mostlyWhiteMaterials =
+        model.materialCount > 0 && whiteMaterialCount >= model.materialCount - 1;
+    const bool forcePalette = !hasRenderableTexture || mostlyWhiteMaterials;
+    if (forcePalette) {
         static constexpr std::array<Color, 8> kMaterialPalette = {
             Color{219, 213, 201, 255}, Color{54, 64, 98, 255},  Color{79, 96, 132, 255},
             Color{147, 102, 87, 255}, Color{234, 228, 205, 255}, Color{118, 72, 82, 255},
             Color{211, 186, 153, 255}, Color{92, 111, 163, 255},
         };
         for (int i = 0; i < model.materialCount; ++i) {
+            Texture2D tex = model.materials[i].maps[MATERIAL_MAP_DIFFUSE].texture;
+            if (tex.width <= 1 || tex.height <= 1) {
+                model.materials[i].maps[MATERIAL_MAP_DIFFUSE].texture = Texture2D{};
+            }
             model.materials[i].maps[MATERIAL_MAP_DIFFUSE].color =
                 kMaterialPalette[static_cast<std::size_t>(i) % kMaterialPalette.size()];
         }
     }
 
-    BoundingBox chosenBounds = GetModelBoundingBox(model);
-    int bestVertexCount = -1;
+    bool hasMergedBounds = false;
+    BoundingBox mergedBounds{};
+    int selectedMeshes = 0;
     for (int i = 0; i < model.meshCount; ++i) {
         const BoundingBox meshBounds = GetMeshBoundingBox(model.meshes[i]);
-        const float w = meshBounds.max.x - meshBounds.min.x;
-        const float h = meshBounds.max.y - meshBounds.min.y;
-        const float d = meshBounds.max.z - meshBounds.min.z;
-        if (h <= 0.02F || w <= 0.02F || d <= 0.02F) {
+        if (!IsUsableMeshBounds(meshBounds, model.meshes[i].vertexCount)) {
             continue;
         }
-        if (h > 60.0F || w > 60.0F || d > 60.0F) {
-            continue;
+        if (!hasMergedBounds) {
+            mergedBounds = meshBounds;
+            hasMergedBounds = true;
+        } else {
+            mergedBounds = MergeBounds(mergedBounds, meshBounds);
         }
-        const int vertexCount = model.meshes[i].vertexCount;
-        if (vertexCount > bestVertexCount) {
-            bestVertexCount = vertexCount;
-            chosenBounds = meshBounds;
-        }
+        selectedMeshes += 1;
     }
 
+    const BoundingBox chosenBounds = hasMergedBounds ? mergedBounds : GetModelBoundingBox(model);
     const float height = chosenBounds.max.y - chosenBounds.min.y;
     const float width = chosenBounds.max.x - chosenBounds.min.x;
     const float depth = chosenBounds.max.z - chosenBounds.min.z;
@@ -421,15 +458,15 @@ void TryLoadPlayerModel(AppState *app) {
 
     app->playerModel = model;
     app->hasPlayerModel = true;
-    app->playerModelHasTexture = hasDiffuseTexture;
+    app->playerModelHasTexture = hasRenderableTexture;
     app->playerModelStatus =
         "Model loaded: " + std::filesystem::path(modelPath).filename().string();
-    if (!hasDiffuseTexture) {
-        app->playerModelStatus += " | no textures detected (using material colors)";
+    if (forcePalette) {
+        app->playerModelStatus += " | palette shading";
     }
 
     if (height > 0.001F) {
-        app->playerModelScale = std::clamp(2.0F / height, 0.04F, 10.0F);
+        app->playerModelScale = std::clamp(kPlayerModelTargetHeight / height, 0.01F, 5.0F);
         app->playerModelPivot = {centerX, chosenBounds.min.y, centerZ};
         app->playerModelAuraRadius =
             std::max(width, depth) * app->playerModelScale * 0.65F + 0.26F;
@@ -438,6 +475,9 @@ void TryLoadPlayerModel(AppState *app) {
         app->playerModelPivot = {0.0F, 0.0F, 0.0F};
         app->playerModelAuraRadius = 0.62F;
     }
+
+    app->playerModelStatus += " | meshes " + std::to_string(selectedMeshes) + "/" +
+                              std::to_string(model.meshCount);
 }
 
 void UnloadPlayerModel(AppState *app) {
@@ -455,6 +495,7 @@ void StartWorld(AppState *app, const nen::Character &character) {
     app->player = character;
     app->hasCharacter = true;
     app->playerPosition = {kArenaBounds.x + 110.0F, kArenaBounds.y + kArenaBounds.height - 130.0F};
+    app->facingDirection = {0.0F, -1.0F};
     app->chargingAura = false;
     app->chargeEffectTimer = 0.0F;
     app->selectedBaseType = character.naturalType;
@@ -768,19 +809,16 @@ void UpdateCombatCamera(AppState *app, float dt) {
         app->playerPosition.x + app->playerSize.x * 0.5F,
         app->playerPosition.y + app->playerSize.y * 0.5F,
     };
+    const Vector2 face = Normalize2D(app->facingDirection);
     const Vector2 focus2D{
-        playerCenter.x * 0.62F + app->enemy.position.x * 0.38F,
-        playerCenter.y * 0.62F + app->enemy.position.y * 0.38F,
+        playerCenter.x + face.x * 58.0F,
+        playerCenter.y + face.y * 58.0F,
     };
     const Vector3 focus = ArenaToWorld(focus2D, 1.0F);
-    const float separationX = playerCenter.x - app->enemy.position.x;
-    const float separationY = playerCenter.y - app->enemy.position.y;
-    const float separation = std::sqrt(separationX * separationX + separationY * separationY);
-    const float tacticalZoom = std::clamp(separation * 0.008F, 0.0F, 7.0F);
-    const float orbitDistance = app->cameraDistance + tacticalZoom;
+    const float orbitDistance = app->cameraDistance;
     const Vector3 desiredPos{
         focus.x + std::cos(app->cameraOrbitAngle) * orbitDistance,
-        focus.y + app->cameraHeight + tacticalZoom * 0.2F,
+        focus.y + app->cameraHeight,
         focus.z + std::sin(app->cameraOrbitAngle) * orbitDistance,
     };
 
@@ -826,6 +864,7 @@ void UpdatePlayerMovement(AppState *app, float dt) {
         const float length = std::sqrt(movement.x * movement.x + movement.y * movement.y);
         movement.x /= length;
         movement.y /= length;
+        app->facingDirection = movement;
     }
 
     const float speed = 320.0F;
@@ -842,8 +881,8 @@ void RechargeAura(AppState *app, float dt) {
     }
 
     app->chargeEffectTimer += dt;
-    const float typeBonus = app->player.naturalType == nen::Type::Enhancer ? 8.0F : 0.0F;
-    const int gain = static_cast<int>(std::floor((39.0F + typeBonus) * dt));
+    const float typeBonus = app->player.naturalType == nen::Type::Enhancer ? 14.0F : 0.0F;
+    const int gain = static_cast<int>(std::floor((72.0F + typeBonus) * dt));
     app->player.auraPool = std::min(kAuraMax, app->player.auraPool + std::max(1, gain));
     app->statusMessage = "Channeling aura... hold R to recover.";
 }
@@ -876,6 +915,8 @@ void CastBaseAttack(AppState *app, Vector2 target) {
 
     const Vector2 origin{app->playerPosition.x + app->playerSize.x * 0.5F,
                          app->playerPosition.y + app->playerSize.y * 0.38F};
+    const Vector2 aim = Normalize2D({target.x - origin.x, target.y - origin.y});
+    app->facingDirection = aim;
     const int damage =
         nen::ComputeAttackDamage(app->player.naturalType, app->selectedBaseType, kBaseAttackPower);
     SpawnBaseAttack(&app->activeAttacks, app->selectedBaseType, origin, target, damage);
@@ -896,6 +937,8 @@ void CastHatsu(AppState *app, Vector2 target) {
 
     const Vector2 origin{app->playerPosition.x + app->playerSize.x * 0.5F,
                          app->playerPosition.y + app->playerSize.y * 0.3F};
+    const Vector2 aim = Normalize2D({target.x - origin.x, target.y - origin.y});
+    app->facingDirection = aim;
     const int potency = std::max(70, app->player.hatsuPotency);
     const int damage = static_cast<int>(
         std::round(nen::ComputeAttackDamage(app->player.naturalType, app->player.naturalType,
@@ -1413,9 +1456,9 @@ void DrawPlayer3D(const AppState &app) {
     const Color aura = TypeColor(app.player.naturalType);
 
     if (app.hasPlayerModel) {
-        const Vector2 toEnemy{app.enemy.position.x - p2.x, app.enemy.position.y - p2.y};
+        const Vector2 facing = Normalize2D(app.facingDirection);
         const float yawDegrees =
-            std::atan2(toEnemy.x, toEnemy.y) * RAD2DEG + app.playerModelYawOffset;
+            std::atan2(facing.x, facing.y) * RAD2DEG + app.playerModelYawOffset;
         const float yaw = yawDegrees * DEG2RAD;
         const Vector3 pivot{
             -app.playerModelPivot.x * app.playerModelScale,
