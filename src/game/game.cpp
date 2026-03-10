@@ -20,8 +20,8 @@ namespace game {
 
 namespace {
 
-constexpr int kWidth = 1560;
-constexpr int kHeight = 920;
+constexpr int kWidth = 1760;
+constexpr int kHeight = 980;
 constexpr int kAuraMax = 2400;
 constexpr int kEnemyMaxHealth = 430;
 
@@ -31,7 +31,10 @@ constexpr int kBaseAttackPower = 25;
 constexpr int kHatsuAttackPower = 44;
 constexpr float kWorldScale = 0.035F;
 
-const Rectangle kArenaBounds{40.0F, 110.0F, 1020.0F, 730.0F};
+constexpr float kSidebarMargin = 28.0F;
+constexpr float kSidebarTop = 88.0F;
+constexpr float kSidebarBottomMargin = 94.0F;
+const Rectangle kArenaBounds{40.0F, 110.0F, 1180.0F, 760.0F};
 
 enum class Screen {
     MainMenu,
@@ -50,6 +53,8 @@ struct EnemyState {
     int health = kEnemyMaxHealth;
     float manipulatedTimer = 0.0F;
     float vulnerabilityTimer = 0.0F;
+    float elasticTimer = 0.0F;
+    float elasticStrength = 0.0F;
     float hitFlashTimer = 0.0F;
 };
 
@@ -85,16 +90,21 @@ struct AppState {
     Model playerModel{};
     bool hasPlayerModel = false;
     float playerModelScale = 1.0F;
-    float playerModelYOffset = 0.0F;
+    Vector3 playerModelPivot{0.0F, 0.0F, 0.0F};
+    float playerModelAuraRadius = 0.5F;
     float playerModelYawOffset = 180.0F;
+    bool playerModelHasTexture = false;
     std::string playerModelPath;
     std::string playerModelStatus = "Model not loaded";
     bool use3DView = true;
+    float cameraOrbitAngle = 0.88F;
+    float cameraDistance = 15.0F;
+    float cameraHeight = 9.0F;
     Camera3D camera{
-        .position = {0.0F, 34.0F, 30.0F},
+        .position = {0.0F, 13.0F, 16.0F},
         .target = {0.0F, 0.0F, 0.0F},
         .up = {0.0F, 1.0F, 0.0F},
-        .fovy = 45.0F,
+        .fovy = 52.0F,
         .projection = CAMERA_PERSPECTIVE,
     };
 
@@ -172,6 +182,110 @@ void DrawButton(const Rectangle &rect, const std::string &label, bool selected) 
                                 selected || hovered ? WHITE : Fade(WHITE, 0.5F));
     DrawText(label.c_str(), static_cast<int>(rect.x + 18.0F),
              static_cast<int>(rect.y + rect.height * 0.28F), 28, RAYWHITE);
+}
+
+float DrawWrappedText(std::string_view text, Rectangle bounds, int fontSize, float spacing,
+                      Color tint, int maxLines = 0) {
+    Font font = GetFontDefault();
+    std::string line;
+    std::string word;
+    float y = bounds.y;
+    int linesDrawn = 0;
+
+    auto flushLine = [&](bool forceEllipsis) {
+        if (line.empty()) {
+            return true;
+        }
+        if (y + static_cast<float>(fontSize) > bounds.y + bounds.height) {
+            return false;
+        }
+        std::string toDraw = line;
+        if (forceEllipsis && toDraw.size() > 3) {
+            toDraw = toDraw.substr(0, toDraw.size() - 3) + "...";
+        }
+        DrawTextEx(font, toDraw.c_str(), {bounds.x, y}, static_cast<float>(fontSize), spacing,
+                   tint);
+        line.clear();
+        y += static_cast<float>(fontSize) + 5.0F;
+        linesDrawn += 1;
+        if (maxLines > 0 && linesDrawn >= maxLines) {
+            return false;
+        }
+        return true;
+    };
+
+    auto appendWord = [&](std::string_view nextWord) {
+        if (nextWord.empty()) {
+            return true;
+        }
+        std::string candidate = line;
+        if (!candidate.empty()) {
+            candidate.push_back(' ');
+        }
+        candidate.append(nextWord);
+
+        const float width =
+            MeasureTextEx(font, candidate.c_str(), static_cast<float>(fontSize), spacing).x;
+        if (width <= bounds.width) {
+            line = std::move(candidate);
+            return true;
+        }
+        if (!flushLine(false)) {
+            return false;
+        }
+
+        line = std::string(nextWord);
+        const float singleWidth =
+            MeasureTextEx(font, line.c_str(), static_cast<float>(fontSize), spacing).x;
+        if (singleWidth <= bounds.width) {
+            return true;
+        }
+
+        std::string fragmented;
+        for (char c : line) {
+            std::string test = fragmented;
+            test.push_back(c);
+            const float testWidth =
+                MeasureTextEx(font, test.c_str(), static_cast<float>(fontSize), spacing).x;
+            if (testWidth > bounds.width && !fragmented.empty()) {
+                line = fragmented;
+                if (!flushLine(false)) {
+                    return false;
+                }
+                fragmented.clear();
+            }
+            fragmented.push_back(c);
+        }
+        line = fragmented;
+        return true;
+    };
+
+    for (char c : std::string(text)) {
+        if (c == '\n') {
+            if (!appendWord(word)) {
+                return y;
+            }
+            word.clear();
+            if (!flushLine(false)) {
+                return y;
+            }
+            continue;
+        }
+        if (c == ' ' || c == '\t') {
+            if (!appendWord(word)) {
+                return y;
+            }
+            word.clear();
+            continue;
+        }
+        word.push_back(c);
+    }
+
+    if (!appendWord(word)) {
+        return y;
+    }
+    flushLine(false);
+    return y;
 }
 
 void HandleNameInput(std::string *text) {
@@ -259,10 +373,25 @@ void TryLoadPlayerModel(AppState *app) {
         return;
     }
 
-    app->playerModel = model;
-    app->hasPlayerModel = true;
-    app->playerModelStatus =
-        "Model loaded: " + std::filesystem::path(modelPath).filename().string();
+    bool hasDiffuseTexture = false;
+    for (int i = 0; i < model.materialCount; ++i) {
+        if (model.materials[i].maps[MATERIAL_MAP_DIFFUSE].texture.id > 0) {
+            hasDiffuseTexture = true;
+            break;
+        }
+    }
+
+    if (!hasDiffuseTexture) {
+        static constexpr std::array<Color, 8> kMaterialPalette = {
+            Color{219, 213, 201, 255}, Color{54, 64, 98, 255},  Color{79, 96, 132, 255},
+            Color{147, 102, 87, 255}, Color{234, 228, 205, 255}, Color{118, 72, 82, 255},
+            Color{211, 186, 153, 255}, Color{92, 111, 163, 255},
+        };
+        for (int i = 0; i < model.materialCount; ++i) {
+            model.materials[i].maps[MATERIAL_MAP_DIFFUSE].color =
+                kMaterialPalette[static_cast<std::size_t>(i) % kMaterialPalette.size()];
+        }
+    }
 
     BoundingBox chosenBounds = GetModelBoundingBox(model);
     int bestVertexCount = -1;
@@ -285,12 +414,29 @@ void TryLoadPlayerModel(AppState *app) {
     }
 
     const float height = chosenBounds.max.y - chosenBounds.min.y;
+    const float width = chosenBounds.max.x - chosenBounds.min.x;
+    const float depth = chosenBounds.max.z - chosenBounds.min.z;
+    const float centerX = (chosenBounds.max.x + chosenBounds.min.x) * 0.5F;
+    const float centerZ = (chosenBounds.max.z + chosenBounds.min.z) * 0.5F;
+
+    app->playerModel = model;
+    app->hasPlayerModel = true;
+    app->playerModelHasTexture = hasDiffuseTexture;
+    app->playerModelStatus =
+        "Model loaded: " + std::filesystem::path(modelPath).filename().string();
+    if (!hasDiffuseTexture) {
+        app->playerModelStatus += " | no textures detected (using material colors)";
+    }
+
     if (height > 0.001F) {
         app->playerModelScale = std::clamp(2.0F / height, 0.04F, 10.0F);
-        app->playerModelYOffset = -chosenBounds.min.y * app->playerModelScale;
+        app->playerModelPivot = {centerX, chosenBounds.min.y, centerZ};
+        app->playerModelAuraRadius =
+            std::max(width, depth) * app->playerModelScale * 0.65F + 0.26F;
     } else {
         app->playerModelScale = 0.65F;
-        app->playerModelYOffset = 0.0F;
+        app->playerModelPivot = {0.0F, 0.0F, 0.0F};
+        app->playerModelAuraRadius = 0.62F;
     }
 }
 
@@ -300,6 +446,7 @@ void UnloadPlayerModel(AppState *app) {
     }
     UnloadModel(app->playerModel);
     app->hasPlayerModel = false;
+    app->playerModelHasTexture = false;
     app->playerModelStatus = "Model unloaded";
 }
 
@@ -316,13 +463,16 @@ void StartWorld(AppState *app, const nen::Character &character) {
     app->activeAttacks.clear();
     app->enemy = EnemyState{};
     app->use3DView = true;
-    app->camera.position = {0.0F, 34.0F, 30.0F};
+    app->cameraOrbitAngle = 0.88F;
+    app->cameraDistance = 15.0F;
+    app->cameraHeight = 9.0F;
+    app->camera.position = {0.0F, 13.0F, 16.0F};
     app->camera.target = {0.0F, 0.0F, 0.0F};
     app->camera.up = {0.0F, 1.0F, 0.0F};
-    app->camera.fovy = 45.0F;
+    app->camera.fovy = 52.0F;
     app->camera.projection = CAMERA_PERSPECTIVE;
     app->statusMessage =
-        "LMB/SPACE base attack, RMB/Q hatsu, hold R to recover aura. TAB toggles 2D/3D.";
+        "LMB/SPACE base attack, RMB/Q hatsu, hold R to recover aura. MMB drag + wheel for camera.";
 }
 
 void EnsureCharacterHasHatsu(nen::Character *character) {
@@ -522,6 +672,10 @@ void MoveEnemy(AppState *app, float dt) {
     enemy.hitFlashTimer = std::max(0.0F, enemy.hitFlashTimer - dt);
     enemy.manipulatedTimer = std::max(0.0F, enemy.manipulatedTimer - dt);
     enemy.vulnerabilityTimer = std::max(0.0F, enemy.vulnerabilityTimer - dt);
+    enemy.elasticTimer = std::max(0.0F, enemy.elasticTimer - dt);
+    if (enemy.elasticTimer <= 0.0F) {
+        enemy.elasticStrength = 0.0F;
+    }
 
     if (enemy.manipulatedTimer > 0.0F) {
         const Vector2 toPlayer{app->playerPosition.x - enemy.position.x,
@@ -538,6 +692,28 @@ void MoveEnemy(AppState *app, float dt) {
     } else {
         enemy.position.x += enemy.velocity.x * dt;
         enemy.position.y += enemy.velocity.y * dt;
+    }
+
+    if (enemy.elasticTimer > 0.0F) {
+        const Vector2 playerCenter{
+            app->playerPosition.x + app->playerSize.x * 0.5F,
+            app->playerPosition.y + app->playerSize.y * 0.5F,
+        };
+        const Vector2 toPlayer{playerCenter.x - enemy.position.x, playerCenter.y - enemy.position.y};
+        const float distance = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
+        if (distance > 0.001F) {
+            const Vector2 dir{toPlayer.x / distance, toPlayer.y / distance};
+            const float restLength = 120.0F;
+            if (distance > restLength) {
+                const float stretch = distance - restLength;
+                const float springForce =
+                    std::min(760.0F, stretch * (3.2F + enemy.elasticStrength));
+                enemy.velocity.x += dir.x * springForce * dt;
+                enemy.velocity.y += dir.y * springForce * dt;
+            }
+            enemy.velocity.x *= 0.985F;
+            enemy.velocity.y *= 0.985F;
+        }
     }
 
     const float left = kArenaBounds.x + enemy.radius;
@@ -578,18 +754,37 @@ void UpdateCombatCamera(AppState *app, float dt) {
         return;
     }
 
+    const float wheel = GetMouseWheelMove();
+    if (wheel != 0.0F) {
+        app->cameraDistance = std::clamp(app->cameraDistance - wheel * 1.1F, 9.5F, 28.0F);
+    }
+    if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE)) {
+        const Vector2 delta = GetMouseDelta();
+        app->cameraOrbitAngle -= delta.x * 0.0055F;
+        app->cameraHeight = std::clamp(app->cameraHeight + delta.y * 0.02F, 5.8F, 15.0F);
+    }
+
     const Vector2 playerCenter{
         app->playerPosition.x + app->playerSize.x * 0.5F,
         app->playerPosition.y + app->playerSize.y * 0.5F,
     };
     const Vector2 focus2D{
-        (playerCenter.x + app->enemy.position.x) * 0.5F,
-        (playerCenter.y + app->enemy.position.y) * 0.5F,
+        playerCenter.x * 0.62F + app->enemy.position.x * 0.38F,
+        playerCenter.y * 0.62F + app->enemy.position.y * 0.38F,
     };
-    const Vector3 focus = ArenaToWorld(focus2D, 0.7F);
-    const Vector3 desiredPos{focus.x + 9.5F, 13.5F, focus.z + 14.5F};
+    const Vector3 focus = ArenaToWorld(focus2D, 1.0F);
+    const float separationX = playerCenter.x - app->enemy.position.x;
+    const float separationY = playerCenter.y - app->enemy.position.y;
+    const float separation = std::sqrt(separationX * separationX + separationY * separationY);
+    const float tacticalZoom = std::clamp(separation * 0.008F, 0.0F, 7.0F);
+    const float orbitDistance = app->cameraDistance + tacticalZoom;
+    const Vector3 desiredPos{
+        focus.x + std::cos(app->cameraOrbitAngle) * orbitDistance,
+        focus.y + app->cameraHeight + tacticalZoom * 0.2F,
+        focus.z + std::sin(app->cameraOrbitAngle) * orbitDistance,
+    };
 
-    const float follow = std::clamp(dt * 4.0F, 0.01F, 0.25F);
+    const float follow = std::clamp(dt * 5.2F, 0.02F, 0.28F);
     app->camera.target.x = Lerp(app->camera.target.x, focus.x, follow);
     app->camera.target.y = Lerp(app->camera.target.y, focus.y, follow);
     app->camera.target.z = Lerp(app->camera.target.z, focus.z, follow);
@@ -640,7 +835,7 @@ void UpdatePlayerMovement(AppState *app, float dt) {
 }
 
 void RechargeAura(AppState *app, float dt) {
-    const bool holdRecharge = IsKeyDown(KEY_R) || IsMouseButtonDown(MOUSE_BUTTON_MIDDLE);
+    const bool holdRecharge = IsKeyDown(KEY_R);
     app->chargingAura = holdRecharge;
     if (!holdRecharge) {
         return;
@@ -714,7 +909,7 @@ void CastHatsu(AppState *app, Vector2 target) {
 
 void ApplyAttackOutcome(AppState *app, const AttackOutcome &outcome) {
     if (outcome.damage <= 0 && outcome.manipulationSeconds <= 0.0F &&
-        outcome.vulnerabilitySeconds <= 0.0F) {
+        outcome.vulnerabilitySeconds <= 0.0F && outcome.elasticSeconds <= 0.0F) {
         return;
     }
 
@@ -726,6 +921,11 @@ void ApplyAttackOutcome(AppState *app, const AttackOutcome &outcome) {
     if (outcome.vulnerabilitySeconds > 0.0F) {
         app->enemy.vulnerabilityTimer =
             std::max(app->enemy.vulnerabilityTimer, outcome.vulnerabilitySeconds);
+    }
+    if (outcome.elasticSeconds > 0.0F) {
+        app->enemy.elasticTimer = std::max(app->enemy.elasticTimer, outcome.elasticSeconds);
+        app->enemy.elasticStrength = std::max(app->enemy.elasticStrength, outcome.elasticStrength);
+        app->statusMessage = "Transmuter elastic tether latched.";
     }
 
     int damage = outcome.damage;
@@ -751,6 +951,10 @@ void ApplyAttackOutcome(AppState *app, const AttackOutcome &outcome) {
                            kArenaBounds.y + 160.0F + static_cast<float>(GetRandomValue(0, 220))};
     app->enemy.velocity = {static_cast<float>(GetRandomValue(-220, -140)),
                            static_cast<float>(GetRandomValue(120, 210))};
+    app->enemy.manipulatedTimer = 0.0F;
+    app->enemy.vulnerabilityTimer = 0.0F;
+    app->enemy.elasticTimer = 0.0F;
+    app->enemy.elasticStrength = 0.0F;
     app->player.auraPool = std::min(kAuraMax, app->player.auraPool + 68);
     app->statusMessage = "Enemy overwhelmed. +68 aura.";
     SaveCurrentCharacter(app);
@@ -1007,9 +1211,69 @@ void DrawEnemy(const AppState &app) {
         DrawCircleLines(enemy.position.x, enemy.position.y, enemy.radius + 16.0F,
                         {255, 120, 205, 255});
     }
+    if (enemy.elasticTimer > 0.0F) {
+        DrawCircleLines(enemy.position.x, enemy.position.y, enemy.radius + 22.0F,
+                        {133, 228, 255, 255});
+    }
+}
+
+void DrawElasticTether2D(const AppState &app) {
+    if (app.enemy.elasticTimer <= 0.0F) {
+        return;
+    }
+
+    const Vector2 player{
+        app.playerPosition.x + app.playerSize.x * 0.5F,
+        app.playerPosition.y + app.playerSize.y * 0.42F,
+    };
+    const Vector2 enemy = app.enemy.position;
+    const Vector2 direction = Normalize2D({enemy.x - player.x, enemy.y - player.y});
+    const Vector2 tangent{-direction.y, direction.x};
+    const float pulse = std::sin(static_cast<float>(GetTime()) * 8.0F) * 8.0F;
+    const Vector2 mid{
+        (player.x + enemy.x) * 0.5F + tangent.x * pulse,
+        (player.y + enemy.y) * 0.5F + tangent.y * pulse,
+    };
+
+    DrawLineBezier(player, mid, 4.5F, {133, 228, 255, 220});
+    DrawLineBezier(mid, enemy, 4.5F, {133, 228, 255, 220});
+    DrawCircleV(mid, 5.0F, {224, 247, 255, 220});
+}
+
+void DrawElasticTether3D(const AppState &app) {
+    if (app.enemy.elasticTimer <= 0.0F) {
+        return;
+    }
+
+    const Vector2 player2{
+        app.playerPosition.x + app.playerSize.x * 0.5F,
+        app.playerPosition.y + app.playerSize.y * 0.42F,
+    };
+    const Vector3 start = ArenaToWorld(player2, 1.1F);
+    const Vector3 end = ArenaToWorld(app.enemy.position, 1.08F);
+    constexpr int segmentCount = 12;
+    const float phase = static_cast<float>(GetTime()) * 12.0F;
+    for (int i = 0; i < segmentCount; ++i) {
+        const float t0 = static_cast<float>(i) / static_cast<float>(segmentCount);
+        const float t1 = static_cast<float>(i + 1) / static_cast<float>(segmentCount);
+        const float wave0 = std::sin(t0 * 18.0F + phase) * 0.09F;
+        const float wave1 = std::sin(t1 * 18.0F + phase) * 0.09F;
+        const Vector3 p0{
+            Lerp(start.x, end.x, t0),
+            Lerp(start.y, end.y, t0) + wave0,
+            Lerp(start.z, end.z, t0),
+        };
+        const Vector3 p1{
+            Lerp(start.x, end.x, t1),
+            Lerp(start.y, end.y, t1) + wave1,
+            Lerp(start.z, end.z, t1),
+        };
+        DrawLine3D(p0, p1, {133, 228, 255, 235});
+    }
 }
 
 void DrawArena3D(const AppState &app) {
+    (void)app;
     const Vector3 center = ArenaToWorld(
         {kArenaBounds.x + kArenaBounds.width * 0.5F, kArenaBounds.y + kArenaBounds.height * 0.5F});
     const float width = kArenaBounds.width * kWorldScale;
@@ -1041,10 +1305,6 @@ void DrawArena3D(const AppState &app) {
                    {x, 0.02F, center.z + depth * 0.5F - 0.2F}, Fade(WHITE, 0.08F));
     }
 
-    if (app.chargingAura) {
-        const float pulse = 0.18F + std::sin(app.chargeEffectTimer * 5.0F) * 0.05F;
-        DrawSphereWires({center.x, 0.2F, center.z}, pulse, 8, 8, Fade(WHITE, 0.4F));
-    }
 }
 
 void DrawAttackEffects3D(const AppState &app) {
@@ -1061,30 +1321,42 @@ void DrawAttackEffects3D(const AppState &app) {
             break;
         case nen::Type::Transmuter: {
             const Vector2 dir2D = Normalize2D(effect.velocity);
-            const Vector3 tail = ArenaToWorld(
-                {effect.position.x - dir2D.x * 24.0F, effect.position.y - dir2D.y * 24.0F},
-                pos.y - 0.08F);
-            DrawLine3D(tail, pos, color);
-            DrawSphere(pos, radius * 0.92F, color);
-            const Vector3 boltA{pos.x + std::sin(effect.phase * 5.0F) * 0.22F, pos.y + 0.25F,
-                                pos.z};
-            const Vector3 boltB{pos.x - std::sin(effect.phase * 5.0F) * 0.22F, pos.y - 0.18F,
-                                pos.z};
-            DrawLine3D(boltA, boltB, Fade(color, 0.95F));
+            const Vector3 tail =
+                ArenaToWorld({effect.position.x - dir2D.x * 28.0F, effect.position.y - dir2D.y * 28.0F},
+                             pos.y - 0.04F);
+            const Vector3 sideA{pos.x + std::sin(effect.phase * 5.2F) * 0.22F, pos.y + 0.18F,
+                                pos.z + std::cos(effect.phase * 6.0F) * 0.17F};
+            const Vector3 sideB{pos.x - std::sin(effect.phase * 5.2F) * 0.22F, pos.y - 0.15F,
+                                pos.z - std::cos(effect.phase * 6.0F) * 0.17F};
+            DrawLine3D(tail, pos, Fade(color, 0.95F));
+            DrawLine3D(sideA, pos, WHITE);
+            DrawLine3D(pos, sideB, WHITE);
+            DrawSphere(pos, radius * 0.75F, color);
+            DrawCircle3D(pos, radius * 1.7F, {0.0F, 0.0F, 1.0F}, 0.0F, Fade(WHITE, 0.52F));
             break;
         }
         case nen::Type::Emitter: {
             const Vector2 dir2D = Normalize2D(effect.velocity);
             const Vector3 start = ArenaToWorld(
                 {effect.position.x - dir2D.x * 28.0F, effect.position.y - dir2D.y * 28.0F}, pos.y);
-            DrawCylinderEx(start, pos, radius * 0.55F, radius * 0.9F, 10, Fade(color, 0.9F));
-            DrawSphere(pos, radius * 0.82F, {255, 240, 220, 255});
+            DrawCylinderEx(start, pos, radius * 0.45F, radius * 0.68F, 10, Fade(color, 0.95F));
+            DrawSphere(pos, radius * 0.58F, {255, 244, 224, 255});
+            DrawCircle3D(pos, radius * 1.2F, {1.0F, 0.0F, 0.0F}, 90.0F, Fade(color, 0.4F));
             break;
         }
-        case nen::Type::Conjurer:
-            DrawCubeV(pos, {radius * 1.8F, radius * 1.8F, radius * 1.8F}, Fade(color, 0.9F));
-            DrawCubeWiresV(pos, {radius * 2.0F, radius * 2.0F, radius * 2.0F}, WHITE);
+        case nen::Type::Conjurer: {
+            const float spin = effect.phase * 240.0F;
+            DrawCubeV(pos, {radius * 1.3F, radius * 0.45F, radius * 3.2F}, Fade(color, 0.9F));
+            DrawCubeWiresV(pos, {radius * 1.4F, radius * 0.48F, radius * 3.35F}, WHITE);
+            const Vector3 shardA{pos.x + std::sin(effect.phase * 4.2F) * radius * 1.9F,
+                                 pos.y + 0.12F, pos.z + std::cos(effect.phase * 4.2F) * radius * 1.9F};
+            const Vector3 shardB{pos.x - std::sin(effect.phase * 4.2F) * radius * 1.9F,
+                                 pos.y - 0.12F, pos.z - std::cos(effect.phase * 4.2F) * radius * 1.9F};
+            DrawCubeV(shardA, {radius * 0.7F, radius * 0.28F, radius * 1.65F}, Fade(color, 0.8F));
+            DrawCubeV(shardB, {radius * 0.7F, radius * 0.28F, radius * 1.65F}, Fade(color, 0.8F));
+            DrawCircle3D(pos, radius * 1.1F, {0.0F, 1.0F, 0.0F}, spin, Fade(WHITE, 0.35F));
             break;
+        }
         case nen::Type::Manipulator: {
             DrawSphere(pos, radius, color);
             const float orbit = radius * 2.2F;
@@ -1128,34 +1400,67 @@ void DrawEnemy3D(const AppState &app) {
         DrawCircle3D({center.x, center.y + 0.05F, center.z}, radius + 0.24F, {1.0F, 0.0F, 0.0F},
                      90.0F, {255, 120, 205, 255});
     }
+    if (enemy.elasticTimer > 0.0F) {
+        DrawCircle3D({center.x, center.y + 0.03F, center.z}, radius + 0.3F, {1.0F, 0.0F, 0.0F},
+                     90.0F, {133, 228, 255, 255});
+    }
 }
 
 void DrawPlayer3D(const AppState &app) {
     const Vector2 p2 = {app.playerPosition.x + app.playerSize.x * 0.5F,
                         app.playerPosition.y + app.playerSize.y * 0.5F};
-    const Vector3 pos = ArenaToWorld(p2, 0.75F);
+    const Vector3 anchor = ArenaToWorld(p2, 0.75F);
     const Color aura = TypeColor(app.player.naturalType);
 
     if (app.hasPlayerModel) {
         const Vector2 toEnemy{app.enemy.position.x - p2.x, app.enemy.position.y - p2.y};
         const float yawDegrees =
             std::atan2(toEnemy.x, toEnemy.y) * RAD2DEG + app.playerModelYawOffset;
-        const Vector3 drawPos = ArenaToWorld(p2, app.playerModelYOffset);
+        const float yaw = yawDegrees * DEG2RAD;
+        const Vector3 pivot{
+            -app.playerModelPivot.x * app.playerModelScale,
+            -app.playerModelPivot.y * app.playerModelScale,
+            -app.playerModelPivot.z * app.playerModelScale,
+        };
+        const Vector3 rotatedPivot{
+            pivot.x * std::cos(yaw) - pivot.z * std::sin(yaw),
+            pivot.y,
+            pivot.x * std::sin(yaw) + pivot.z * std::cos(yaw),
+        };
+        const Vector3 drawPos{anchor.x + rotatedPivot.x, anchor.y + rotatedPivot.y,
+                              anchor.z + rotatedPivot.z};
+        const Color modelTint = app.chargingAura ? Color{240, 240, 248, 255} : WHITE;
+        if (app.chargingAura) {
+            DrawModelWiresEx(app.playerModel, drawPos, {0.0F, 1.0F, 0.0F}, yawDegrees,
+                             {app.playerModelScale, app.playerModelScale, app.playerModelScale},
+                             Fade(WHITE, 0.26F));
+        }
         DrawModelEx(app.playerModel, drawPos, {0.0F, 1.0F, 0.0F}, yawDegrees,
-                    {app.playerModelScale, app.playerModelScale, app.playerModelScale}, WHITE);
+                    {app.playerModelScale, app.playerModelScale, app.playerModelScale}, modelTint);
     } else {
-        DrawCube({pos.x, pos.y + 0.22F, pos.z}, 0.38F, 0.46F, 0.24F, {48, 74, 123, 255});
-        DrawCube({pos.x - 0.24F, pos.y + 0.2F, pos.z}, 0.1F, 0.34F, 0.1F, {230, 220, 201, 255});
-        DrawCube({pos.x + 0.24F, pos.y + 0.2F, pos.z}, 0.1F, 0.34F, 0.1F, {230, 220, 201, 255});
-        DrawCube({pos.x - 0.1F, pos.y - 0.18F, pos.z}, 0.1F, 0.34F, 0.1F, {220, 211, 196, 255});
-        DrawCube({pos.x + 0.1F, pos.y - 0.18F, pos.z}, 0.1F, 0.34F, 0.1F, {220, 211, 196, 255});
-        DrawSphere({pos.x, pos.y + 0.57F, pos.z}, 0.13F, {236, 226, 205, 255});
+        DrawCube({anchor.x, anchor.y + 0.22F, anchor.z}, 0.38F, 0.46F, 0.24F, {48, 74, 123, 255});
+        DrawCube({anchor.x - 0.24F, anchor.y + 0.2F, anchor.z}, 0.1F, 0.34F, 0.1F,
+                 {230, 220, 201, 255});
+        DrawCube({anchor.x + 0.24F, anchor.y + 0.2F, anchor.z}, 0.1F, 0.34F, 0.1F,
+                 {230, 220, 201, 255});
+        DrawCube({anchor.x - 0.1F, anchor.y - 0.18F, anchor.z}, 0.1F, 0.34F, 0.1F,
+                 {220, 211, 196, 255});
+        DrawCube({anchor.x + 0.1F, anchor.y - 0.18F, anchor.z}, 0.1F, 0.34F, 0.1F,
+                 {220, 211, 196, 255});
+        DrawSphere({anchor.x, anchor.y + 0.57F, anchor.z}, 0.13F, {236, 226, 205, 255});
     }
 
-    DrawCircle3D({pos.x, pos.y + 0.22F, pos.z}, 0.4F, {1.0F, 0.0F, 0.0F}, 90.0F, Fade(aura, 0.8F));
+    const float auraRadius = app.hasPlayerModel ? app.playerModelAuraRadius : 0.48F;
+    DrawCircle3D({anchor.x, anchor.y + 0.22F, anchor.z}, auraRadius, {1.0F, 0.0F, 0.0F}, 90.0F,
+                 Fade(aura, 0.8F));
     if (app.chargingAura) {
-        const float pulse = 0.52F + std::sin(app.chargeEffectTimer * 4.8F) * 0.06F;
-        DrawCircle3D({pos.x, pos.y + 0.22F, pos.z}, pulse, {1.0F, 0.0F, 0.0F}, 90.0F, WHITE);
+        const float t = app.chargeEffectTimer;
+        const float pulse = auraRadius + 0.18F + std::sin(t * 5.2F) * 0.07F;
+        DrawSphereWires({anchor.x, anchor.y + 0.56F, anchor.z}, pulse, 10, 10, Fade(WHITE, 0.72F));
+        DrawCircle3D({anchor.x, anchor.y + 0.22F, anchor.z}, pulse, {1.0F, 0.0F, 0.0F}, 90.0F,
+                     WHITE);
+        DrawCircle3D({anchor.x, anchor.y + 0.92F, anchor.z}, pulse * 0.88F, {1.0F, 0.0F, 0.0F},
+                     90.0F, Fade(WHITE, 0.88F));
     }
 }
 
@@ -1166,6 +1471,7 @@ void DrawWorld(const AppState &app) {
         BeginMode3D(app.camera);
         DrawArena3D(app);
         DrawAttackEffects3D(app);
+        DrawElasticTether3D(app);
         DrawEnemy3D(app);
         DrawPlayer3D(app);
         EndMode3D();
@@ -1189,70 +1495,103 @@ void DrawWorld(const AppState &app) {
         DrawAttackEffects(app.activeAttacks);
         DrawEnemy(app);
         DrawPlayer(app);
+        DrawElasticTether2D(app);
         DrawText("2D Mode (TAB for 3D)", static_cast<int>(kArenaBounds.x),
                  static_cast<int>(kArenaBounds.y - 34.0F), 24, Fade(WHITE, 0.9F));
     }
 
-    const int panelX = 1100;
-    DrawRectangleRounded({static_cast<float>(panelX), 110.0F, 420.0F, 730.0F}, 0.03F, 6,
-                         {22, 34, 56, 255});
-    DrawRectangleRoundedLinesEx({static_cast<float>(panelX), 110.0F, 420.0F, 730.0F}, 0.03F, 6,
-                                2.0F, Fade(WHITE, 0.6F));
+    const float panelX = kArenaBounds.x + kArenaBounds.width + kSidebarMargin;
+    const float panelY = kSidebarTop;
+    const float panelW = static_cast<float>(kWidth) - panelX - kSidebarMargin;
+    const float panelH = static_cast<float>(kHeight) - panelY - kSidebarBottomMargin;
+    const Rectangle panelRect{panelX, panelY, panelW, panelH};
+    DrawRectangleRounded(panelRect, 0.03F, 6, {22, 34, 56, 255});
+    DrawRectangleRoundedLinesEx(panelRect, 0.03F, 6, 2.0F, Fade(WHITE, 0.6F));
 
-    DrawText(TextFormat("Name: %s", app.player.name.c_str()), panelX + 20, 138, 28, RAYWHITE);
-    DrawText(TextFormat("Type: %s", nen::ToString(app.player.naturalType).data()), panelX + 20, 174,
-             28, RAYWHITE);
-    DrawText(TextFormat("Aura: %d / %d", app.player.auraPool, kAuraMax), panelX + 20, 210, 28,
-             RAYWHITE);
-    DrawText(TextFormat("Hatsu: %s", app.player.hatsuName.c_str()), panelX + 20, 248, 24,
-             LIGHTGRAY);
-    DrawText(TextFormat("Hatsu Skill: %s", nen::HatsuAbilityName(app.player.naturalType).data()),
-             panelX + 20, 278, 24, LIGHTGRAY);
-    DrawText(TextFormat("Potency: %d", app.player.hatsuPotency), panelX + 20, 308, 24, LIGHTGRAY);
-    DrawText(TextFormat("Base Type: %s", nen::ToString(app.selectedBaseType).data()), panelX + 20,
-             338, 24, LIGHTGRAY);
-    DrawText(TextFormat("Model: %s", app.hasPlayerModel ? "Loaded" : "Fallback"), panelX + 20, 368,
-             24, app.hasPlayerModel ? Color{150, 234, 170, 255} : Color{250, 190, 128, 255});
-    DrawText(TextFormat("Model Scale: %.2f", app.playerModelScale), panelX + 20, 392, 18,
-             Fade(WHITE, 0.72F));
-    if (!app.hasPlayerModel) {
-        DrawText(app.playerModelStatus.c_str(), panelX + 20, 412, 18, Fade(WHITE, 0.72F));
-    }
+    const float textX = panelX + 18.0F;
+    const float textW = panelW - 36.0F;
+    float y = panelY + 20.0F;
 
-    const int statY = app.hasPlayerModel ? 418 : 438;
-    DrawText(TextFormat("Base CD: %.2fs", app.baseAttackCooldown), panelX + 20, statY, 24,
-             LIGHTGRAY);
-    DrawText(TextFormat("Hatsu CD: %.2fs", app.hatsuCooldown), panelX + 20, statY + 30, 24,
-             LIGHTGRAY);
-    DrawText(TextFormat("Enemy HP: %d / %d", app.enemy.health, app.enemy.maxHealth), panelX + 20,
-             statY + 60, 24, LIGHTGRAY);
+    DrawText(TextFormat("Name: %s", app.player.name.c_str()), static_cast<int>(textX),
+             static_cast<int>(y), 28, RAYWHITE);
+    y += 36.0F;
+    DrawText(TextFormat("Type: %s", nen::ToString(app.player.naturalType).data()),
+             static_cast<int>(textX), static_cast<int>(y), 28, RAYWHITE);
+    y += 36.0F;
+    DrawText(TextFormat("Aura: %d / %d", app.player.auraPool, kAuraMax), static_cast<int>(textX),
+             static_cast<int>(y), 28, RAYWHITE);
+    y += 40.0F;
+
+    y = DrawWrappedText(TextFormat("Hatsu: %s", app.player.hatsuName.c_str()), {textX, y, textW, 64.0F},
+                        24, 1.0F, LIGHTGRAY);
+    y = DrawWrappedText(TextFormat("Hatsu Skill: %s", nen::HatsuAbilityName(app.player.naturalType).data()),
+                        {textX, y + 2.0F, textW, 64.0F}, 24, 1.0F, LIGHTGRAY);
+    DrawText(TextFormat("Potency: %d", app.player.hatsuPotency), static_cast<int>(textX),
+             static_cast<int>(y + 6.0F), 24, LIGHTGRAY);
+    y += 34.0F;
+    DrawText(TextFormat("Base Type: %s", nen::ToString(app.selectedBaseType).data()),
+             static_cast<int>(textX), static_cast<int>(y), 24, LIGHTGRAY);
+    y += 30.0F;
+
+    DrawText(TextFormat("Model: %s", app.hasPlayerModel ? "Loaded" : "Fallback"),
+             static_cast<int>(textX), static_cast<int>(y), 24,
+             app.hasPlayerModel ? Color{150, 234, 170, 255} : Color{250, 190, 128, 255});
+    y += 26.0F;
+    DrawText(TextFormat("Model Scale: %.2f", app.playerModelScale), static_cast<int>(textX),
+             static_cast<int>(y), 18, Fade(WHITE, 0.72F));
+    y += 22.0F;
+    y = DrawWrappedText(app.playerModelStatus, {textX, y, textW, 56.0F}, 17, 1.0F,
+                        Fade(WHITE, 0.72F), 2);
+    y += 6.0F;
+
+    DrawText(TextFormat("Base CD: %.2fs", app.baseAttackCooldown), static_cast<int>(textX),
+             static_cast<int>(y), 24, LIGHTGRAY);
+    y += 30.0F;
+    DrawText(TextFormat("Hatsu CD: %.2fs", app.hatsuCooldown), static_cast<int>(textX),
+             static_cast<int>(y), 24, LIGHTGRAY);
+    y += 30.0F;
+    DrawText(TextFormat("Enemy HP: %d / %d", app.enemy.health, app.enemy.maxHealth),
+             static_cast<int>(textX), static_cast<int>(y), 24, LIGHTGRAY);
+    y += 30.0F;
 
     if (app.enemy.manipulatedTimer > 0.0F) {
-        DrawText(TextFormat("Manipulated: %.2fs", app.enemy.manipulatedTimer), panelX + 20,
-                 statY + 92, 24, {255, 210, 120, 255});
+        DrawText(TextFormat("Manipulated: %.2fs", app.enemy.manipulatedTimer), static_cast<int>(textX),
+                 static_cast<int>(y), 24, {255, 210, 120, 255});
+        y += 30.0F;
     }
     if (app.enemy.vulnerabilityTimer > 0.0F) {
-        DrawText(TextFormat("Vulnerable: %.2fs", app.enemy.vulnerabilityTimer), panelX + 20,
-                 statY + 122, 24, {255, 121, 210, 255});
+        DrawText(TextFormat("Vulnerable: %.2fs", app.enemy.vulnerabilityTimer), static_cast<int>(textX),
+                 static_cast<int>(y), 24, {255, 121, 210, 255});
+        y += 30.0F;
+    }
+    if (app.enemy.elasticTimer > 0.0F) {
+        DrawText(TextFormat("Elastic: %.2fs", app.enemy.elasticTimer), static_cast<int>(textX),
+                 static_cast<int>(y), 24, {133, 228, 255, 255});
+        y += 30.0F;
     }
 
-    DrawText("Hatsu Description", panelX + 20, 574, 28, RAYWHITE);
-    DrawText(nen::HatsuAbilityDescription(app.player.naturalType).data(), panelX + 20, 608, 20,
-             LIGHTGRAY);
+    DrawText("Hatsu Description", static_cast<int>(textX), static_cast<int>(y + 10.0F), 28, RAYWHITE);
+    y = DrawWrappedText(nen::HatsuAbilityDescription(app.player.naturalType),
+                        {textX, y + 44.0F, textW, 76.0F}, 20, 1.0F, LIGHTGRAY, 3);
+    y += 12.0F;
 
-    DrawText("Controls", panelX + 20, 648, 28, RAYWHITE);
-    DrawText("Move: WASD / Arrows", panelX + 20, 684, 22, LIGHTGRAY);
-    DrawText("Base Attack: LMB or SPACE", panelX + 20, 712, 22, LIGHTGRAY);
-    DrawText("Select Base Type: 1..6", panelX + 20, 740, 22, LIGHTGRAY);
-    DrawText("Hatsu: RMB or Q | Recharge: Hold R", panelX + 20, 768, 22, LIGHTGRAY);
-    DrawText("TAB 2D/3D | +/- model scale", panelX + 20, 796, 22, LIGHTGRAY);
-    DrawText("Save: F5 | Back: ESC", panelX + 20, 824, 22, LIGHTGRAY);
+    DrawText("Controls", static_cast<int>(textX), static_cast<int>(y + 8.0F), 28, RAYWHITE);
+    y += 42.0F;
+    y = DrawWrappedText("Move: WASD / Arrows", {textX, y, textW, 28.0F}, 22, 1.0F, LIGHTGRAY);
+    y = DrawWrappedText("Base Attack: LMB or SPACE", {textX, y, textW, 28.0F}, 22, 1.0F, LIGHTGRAY);
+    y = DrawWrappedText("Select Base Type: 1..6", {textX, y, textW, 28.0F}, 22, 1.0F, LIGHTGRAY);
+    y = DrawWrappedText("Hatsu: RMB or Q | Recharge: Hold R", {textX, y, textW, 48.0F}, 22, 1.0F,
+                        LIGHTGRAY, 2);
+    y = DrawWrappedText("Camera: Hold MMB + drag orbit, mouse wheel zoom",
+                        {textX, y, textW, 52.0F}, 22, 1.0F, LIGHTGRAY, 2);
+    y = DrawWrappedText("TAB 2D/3D | +/- model scale", {textX, y, textW, 28.0F}, 22, 1.0F, LIGHTGRAY);
+    DrawWrappedText("Save: F5 | Back: ESC", {textX, y, textW, 28.0F}, 22, 1.0F, LIGHTGRAY);
 }
 
 } // namespace
 
 int Run() {
-    InitWindow(kWidth, kHeight, "Nen World - 2D Prototype");
+    InitWindow(kWidth, kHeight, "Nen World - Nen Combat Prototype");
     SetTargetFPS(60);
     SetExitKey(KEY_NULL);
 

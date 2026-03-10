@@ -6,7 +6,7 @@ This repository is a learning-first C++ project for building a Nen sandbox game 
 
 - C++20
 - CMake + Ninja
-- raylib (2D runtime)
+- raylib (2D + early 3D runtime)
 - CTest (unit tests)
 - clang-format + clang-tidy
 
@@ -44,6 +44,9 @@ Controls:
 - `Q` or right mouse button: cast your character's unique hatsu
 - Hold `R`: recharge aura with white channeling animation
 - `TAB`: toggle 2D/3D combat view
+- Hold middle mouse button + drag: orbit 3D camera
+- Mouse wheel: zoom 3D camera
+- `+`/`-`: adjust loaded model scale
 - `F5`: manual save
 - `ESC`: back to menu (or quit from main menu)
 
@@ -107,6 +110,7 @@ This is currently a Tier 1 prototype:
 - hatsu ability name/description visible to player
 - animated type-specific base attacks + hatsu attacks
 - manipulation/vulnerability combat effects (Manipulator-type control fantasy)
+- transmuter elastic tether effect that snaps enemies back toward the player
 - aura economy loop (spend aura in combat, recover by channeling)
 - first 3D arena migration path with primitive character models
 

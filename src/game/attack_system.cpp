@@ -45,7 +45,8 @@ Color AttackColor(nen::Type type) {
 AttackEffect MakeEffect(nen::Type type, bool hatsu, Vector2 origin, Vector2 target,
                         Vector2 velocity, float radius, float life, int damage, float phase = 0.0F,
                         float manipulation = 0.0F, float vulnerability = 0.0F,
-                        float homingStrength = 0.0F) {
+                        float homingStrength = 0.0F, float elasticSeconds = 0.0F,
+                        float elasticStrength = 0.0F) {
     return AttackEffect{
         .type = type,
         .hatsu = hatsu,
@@ -62,6 +63,8 @@ AttackEffect MakeEffect(nen::Type type, bool hatsu, Vector2 origin, Vector2 targ
         .hasHit = false,
         .manipulationSeconds = manipulation,
         .vulnerabilitySeconds = vulnerability,
+        .elasticSeconds = elasticSeconds,
+        .elasticStrength = elasticStrength,
     };
 }
 
@@ -80,13 +83,15 @@ void SpawnTransmuter(std::vector<AttackEffect> *effects, bool hatsu, Vector2 ori
         {direction.x * (hatsu ? 610.0F : 500.0F), direction.y * (hatsu ? 610.0F : 500.0F)},
         hatsu ? 12.0F : 10.0F, hatsu ? 1.25F : 1.0F, damage,
         static_cast<float>(GetRandomValue(0, 360)) * DEG2RAD, hatsu ? 1.1F : 0.0F,
-        hatsu ? 1.0F : 0.0F, hatsu ? 0.45F : 0.0F));
+        hatsu ? 1.0F : 0.0F, hatsu ? 0.45F : 0.0F, hatsu ? 2.8F : 0.7F,
+        hatsu ? 1.1F : 0.45F));
     if (hatsu) {
         const Vector2 alt = Rotate(direction, 0.2F);
         effects->push_back(MakeEffect(nen::Type::Transmuter, true, origin, target,
                                       {alt.x * 540.0F, alt.y * 540.0F}, 10.0F, 1.1F,
                                       static_cast<int>(damage * 0.8F),
-                                      static_cast<float>(GetRandomValue(0, 360)) * DEG2RAD));
+                                      static_cast<float>(GetRandomValue(0, 360)) * DEG2RAD, 0.0F,
+                                      0.0F, 0.0F, 1.9F, 0.9F));
     }
 }
 
@@ -263,6 +268,8 @@ AttackOutcome UpdateAttackEffects(std::vector<AttackEffect> *effects, float dt,
             std::max(outcome.manipulationSeconds, effect.manipulationSeconds);
         outcome.vulnerabilitySeconds =
             std::max(outcome.vulnerabilitySeconds, effect.vulnerabilitySeconds);
+        outcome.elasticSeconds = std::max(outcome.elasticSeconds, effect.elasticSeconds);
+        outcome.elasticStrength = std::max(outcome.elasticStrength, effect.elasticStrength);
 
         if (effect.type == nen::Type::Enhancer) {
             effect.maxLifetime = std::min(effect.maxLifetime, effect.lifetime + 0.08F);

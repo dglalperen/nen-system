@@ -24,12 +24,16 @@ struct AttackEffect {
     bool hasHit;
     float manipulationSeconds;
     float vulnerabilitySeconds;
+    float elasticSeconds;
+    float elasticStrength;
 };
 
 struct AttackOutcome {
     int damage = 0;
     float manipulationSeconds = 0.0F;
     float vulnerabilitySeconds = 0.0F;
+    float elasticSeconds = 0.0F;
+    float elasticStrength = 0.0F;
 };
 
 void SpawnBaseAttack(std::vector<AttackEffect> *effects, nen::Type attackType, Vector2 origin,
