@@ -254,13 +254,30 @@ void TryLoadPlayerModel(AppState *app) {
     app->hasPlayerModel = true;
     app->playerModelStatus = "Killua model loaded";
 
-    const BoundingBox bounds = GetModelBoundingBox(model);
-    const float height = bounds.max.y - bounds.min.y;
+    BoundingBox chosenBounds = GetModelBoundingBox(model);
+    float chosenScore = -1.0F;
+    for (int i = 0; i < model.meshCount; ++i) {
+        const BoundingBox meshBounds = GetMeshBoundingBox(model.meshes[i]);
+        const float w = meshBounds.max.x - meshBounds.min.x;
+        const float h = meshBounds.max.y - meshBounds.min.y;
+        const float d = meshBounds.max.z - meshBounds.min.z;
+        if (h <= 0.02F || w <= 0.001F || d <= 0.001F) {
+            continue;
+        }
+        const float volume = w * h * d;
+        const float score = volume * (h > 6.0F ? 0.15F : 1.0F);
+        if (score > chosenScore) {
+            chosenScore = score;
+            chosenBounds = meshBounds;
+        }
+    }
+
+    const float height = chosenBounds.max.y - chosenBounds.min.y;
     if (height > 0.001F) {
-        app->playerModelScale = std::clamp(1.75F / height, 0.02F, 8.0F);
-        app->playerModelYOffset = -bounds.min.y * app->playerModelScale;
+        app->playerModelScale = std::clamp(2.0F / height, 0.04F, 10.0F);
+        app->playerModelYOffset = -chosenBounds.min.y * app->playerModelScale;
     } else {
-        app->playerModelScale = 1.0F;
+        app->playerModelScale = 0.65F;
         app->playerModelYOffset = 0.0F;
     }
 }
@@ -743,6 +760,14 @@ void UpdateWorld(AppState *app) {
         app->use3DView = !app->use3DView;
         app->statusMessage = app->use3DView ? "3D view enabled." : "2D view enabled.";
     }
+    if (app->hasPlayerModel && IsKeyPressed(KEY_EQUAL)) {
+        app->playerModelScale = std::min(15.0F, app->playerModelScale * 1.12F);
+        app->statusMessage = "Model scale increased.";
+    }
+    if (app->hasPlayerModel && IsKeyPressed(KEY_MINUS)) {
+        app->playerModelScale = std::max(0.02F, app->playerModelScale * 0.9F);
+        app->statusMessage = "Model scale decreased.";
+    }
 
     UpdateBaseTypeSelection(app);
 
@@ -1075,7 +1100,7 @@ void DrawAttackEffects3D(const AppState &app) {
 void DrawEnemy3D(const AppState &app) {
     const EnemyState &enemy = app.enemy;
     const Vector3 center = ArenaToWorld(enemy.position, 0.95F);
-    const float radius = enemy.radius * kWorldScale;
+    const float radius = enemy.radius * kWorldScale * 0.45F;
     const Color coreColor =
         enemy.hitFlashTimer > 0.0F ? Color{255, 236, 178, 255} : Color{216, 105, 102, 255};
 
@@ -1176,11 +1201,13 @@ void DrawWorld(const AppState &app) {
              338, 24, LIGHTGRAY);
     DrawText(TextFormat("Model: %s", app.hasPlayerModel ? "Loaded" : "Fallback"), panelX + 20, 368,
              24, app.hasPlayerModel ? Color{150, 234, 170, 255} : Color{250, 190, 128, 255});
+    DrawText(TextFormat("Model Scale: %.2f", app.playerModelScale), panelX + 20, 392, 18,
+             Fade(WHITE, 0.72F));
     if (!app.hasPlayerModel) {
-        DrawText(app.playerModelStatus.c_str(), panelX + 20, 392, 18, Fade(WHITE, 0.72F));
+        DrawText(app.playerModelStatus.c_str(), panelX + 20, 412, 18, Fade(WHITE, 0.72F));
     }
 
-    const int statY = app.hasPlayerModel ? 402 : 422;
+    const int statY = app.hasPlayerModel ? 418 : 438;
     DrawText(TextFormat("Base CD: %.2fs", app.baseAttackCooldown), panelX + 20, statY, 24,
              LIGHTGRAY);
     DrawText(TextFormat("Hatsu CD: %.2fs", app.hatsuCooldown), panelX + 20, statY + 30, 24,
@@ -1197,16 +1224,17 @@ void DrawWorld(const AppState &app) {
                  statY + 122, 24, {255, 121, 210, 255});
     }
 
-    DrawText("Hatsu Description", panelX + 20, 590, 28, RAYWHITE);
-    DrawText(nen::HatsuAbilityDescription(app.player.naturalType).data(), panelX + 20, 626, 20,
+    DrawText("Hatsu Description", panelX + 20, 574, 28, RAYWHITE);
+    DrawText(nen::HatsuAbilityDescription(app.player.naturalType).data(), panelX + 20, 608, 20,
              LIGHTGRAY);
 
-    DrawText("Controls", panelX + 20, 668, 28, RAYWHITE);
-    DrawText("Move: WASD / Arrows", panelX + 20, 706, 22, LIGHTGRAY);
-    DrawText("Base Attack: LMB or SPACE", panelX + 20, 734, 22, LIGHTGRAY);
-    DrawText("Select Base Type: 1..6", panelX + 20, 762, 22, LIGHTGRAY);
-    DrawText("Hatsu: RMB or Q | Recharge: Hold R", panelX + 20, 790, 22, LIGHTGRAY);
-    DrawText("TAB 2D/3D | Save: F5 | Back: ESC", panelX + 20, 818, 22, LIGHTGRAY);
+    DrawText("Controls", panelX + 20, 648, 28, RAYWHITE);
+    DrawText("Move: WASD / Arrows", panelX + 20, 684, 22, LIGHTGRAY);
+    DrawText("Base Attack: LMB or SPACE", panelX + 20, 712, 22, LIGHTGRAY);
+    DrawText("Select Base Type: 1..6", panelX + 20, 740, 22, LIGHTGRAY);
+    DrawText("Hatsu: RMB or Q | Recharge: Hold R", panelX + 20, 768, 22, LIGHTGRAY);
+    DrawText("TAB 2D/3D | +/- model scale", panelX + 20, 796, 22, LIGHTGRAY);
+    DrawText("Save: F5 | Back: ESC", panelX + 20, 824, 22, LIGHTGRAY);
 }
 
 } // namespace

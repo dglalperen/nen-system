@@ -12,8 +12,10 @@ struct AttackEffect {
     nen::Type type;
     bool hatsu;
     Vector2 origin;
+    Vector2 target;
     Vector2 position;
     Vector2 velocity;
+    float homingStrength;
     float radius;
     float lifetime;
     float maxLifetime;

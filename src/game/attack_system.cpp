@@ -42,15 +42,18 @@ Color AttackColor(nen::Type type) {
     return WHITE;
 }
 
-AttackEffect MakeEffect(nen::Type type, bool hatsu, Vector2 origin, Vector2 velocity, float radius,
-                        float life, int damage, float phase = 0.0F, float manipulation = 0.0F,
-                        float vulnerability = 0.0F) {
+AttackEffect MakeEffect(nen::Type type, bool hatsu, Vector2 origin, Vector2 target,
+                        Vector2 velocity, float radius, float life, int damage, float phase = 0.0F,
+                        float manipulation = 0.0F, float vulnerability = 0.0F,
+                        float homingStrength = 0.0F) {
     return AttackEffect{
         .type = type,
         .hatsu = hatsu,
         .origin = origin,
+        .target = target,
         .position = origin,
         .velocity = velocity,
+        .homingStrength = homingStrength,
         .radius = radius,
         .lifetime = 0.0F,
         .maxLifetime = life,
@@ -62,8 +65,9 @@ AttackEffect MakeEffect(nen::Type type, bool hatsu, Vector2 origin, Vector2 velo
     };
 }
 
-void SpawnEnhancer(std::vector<AttackEffect> *effects, bool hatsu, Vector2 origin, int damage) {
-    effects->push_back(MakeEffect(nen::Type::Enhancer, hatsu, origin, {0.0F, 0.0F},
+void SpawnEnhancer(std::vector<AttackEffect> *effects, bool hatsu, Vector2 origin, Vector2 target,
+                   int damage) {
+    effects->push_back(MakeEffect(nen::Type::Enhancer, hatsu, origin, target, {0.0F, 0.0F},
                                   hatsu ? 34.0F : 24.0F, hatsu ? 0.34F : 0.24F,
                                   hatsu ? static_cast<int>(damage * 1.3F) : damage));
 }
@@ -72,15 +76,16 @@ void SpawnTransmuter(std::vector<AttackEffect> *effects, bool hatsu, Vector2 ori
                      int damage) {
     const Vector2 direction = NormalizeSafe({target.x - origin.x, target.y - origin.y});
     effects->push_back(MakeEffect(
-        nen::Type::Transmuter, hatsu, origin,
+        nen::Type::Transmuter, hatsu, origin, target,
         {direction.x * (hatsu ? 590.0F : 500.0F), direction.y * (hatsu ? 590.0F : 500.0F)},
         hatsu ? 12.0F : 10.0F, hatsu ? 1.20F : 1.0F, damage,
         static_cast<float>(GetRandomValue(0, 360)) * DEG2RAD));
     if (hatsu) {
         const Vector2 alt = Rotate(direction, 0.2F);
-        effects->push_back(MakeEffect(
-            nen::Type::Transmuter, true, origin, {alt.x * 540.0F, alt.y * 540.0F}, 10.0F, 1.1F,
-            static_cast<int>(damage * 0.8F), static_cast<float>(GetRandomValue(0, 360)) * DEG2RAD));
+        effects->push_back(MakeEffect(nen::Type::Transmuter, true, origin, target,
+                                      {alt.x * 540.0F, alt.y * 540.0F}, 10.0F, 1.1F,
+                                      static_cast<int>(damage * 0.8F),
+                                      static_cast<float>(GetRandomValue(0, 360)) * DEG2RAD));
     }
 }
 
@@ -88,7 +93,7 @@ void SpawnEmitter(std::vector<AttackEffect> *effects, bool hatsu, Vector2 origin
                   int damage) {
     const Vector2 direction = NormalizeSafe({target.x - origin.x, target.y - origin.y});
     effects->push_back(MakeEffect(
-        nen::Type::Emitter, hatsu, origin,
+        nen::Type::Emitter, hatsu, origin, target,
         {direction.x * (hatsu ? 760.0F : 620.0F), direction.y * (hatsu ? 760.0F : 620.0F)},
         hatsu ? 16.0F : 11.0F, hatsu ? 1.18F : 1.0F,
         hatsu ? static_cast<int>(damage * 1.2F) : damage));
@@ -101,9 +106,10 @@ void SpawnConjurer(std::vector<AttackEffect> *effects, bool hatsu, Vector2 origi
     for (int i = 0; i < count; ++i) {
         const float angle = hatsu ? (-0.18F + static_cast<float>(i) * 0.18F) : 0.0F;
         const Vector2 v = Rotate(direction, angle);
-        effects->push_back(MakeEffect(nen::Type::Conjurer, hatsu, origin,
-                                      {v.x * 430.0F, v.y * 430.0F}, hatsu ? 14.0F : 12.0F, 1.28F,
-                                      hatsu ? static_cast<int>(damage * 0.7F) : damage, angle));
+        effects->push_back(MakeEffect(nen::Type::Conjurer, hatsu, origin, target,
+                                      {v.x * 410.0F, v.y * 410.0F}, hatsu ? 14.0F : 12.0F, 1.45F,
+                                      hatsu ? static_cast<int>(damage * 0.7F) : damage, angle, 0.0F,
+                                      0.0F, hatsu ? 1.25F : 0.8F));
     }
 }
 
@@ -111,7 +117,7 @@ void SpawnManipulator(std::vector<AttackEffect> *effects, bool hatsu, Vector2 or
                       Vector2 target, int damage) {
     const Vector2 direction = NormalizeSafe({target.x - origin.x, target.y - origin.y});
     effects->push_back(MakeEffect(
-        nen::Type::Manipulator, hatsu, origin,
+        nen::Type::Manipulator, hatsu, origin, target,
         {direction.x * (hatsu ? 350.0F : 300.0F), direction.y * (hatsu ? 350.0F : 300.0F)},
         hatsu ? 16.0F : 12.0F, hatsu ? 1.5F : 1.35F, damage, 0.0F, hatsu ? 3.5F : 1.9F,
         hatsu ? 3.5F : 1.8F));
@@ -126,7 +132,7 @@ void SpawnSpecialist(std::vector<AttackEffect> *effects, bool hatsu, Vector2 ori
         const float angle = -0.35F + t * 0.7F;
         const Vector2 v = Rotate(direction, angle);
         effects->push_back(MakeEffect(
-            nen::Type::Specialist, hatsu, origin, {v.x * 530.0F, v.y * 530.0F},
+            nen::Type::Specialist, hatsu, origin, target, {v.x * 530.0F, v.y * 530.0F},
             hatsu ? 10.0F : 8.0F, 1.12F,
             hatsu ? static_cast<int>(damage * 0.55F) : static_cast<int>(damage * 0.45F), angle));
     }
@@ -136,7 +142,7 @@ void SpawnForType(std::vector<AttackEffect> *effects, nen::Type type, bool hatsu
                   Vector2 target, int damage) {
     switch (type) {
     case nen::Type::Enhancer:
-        SpawnEnhancer(effects, hatsu, origin, damage);
+        SpawnEnhancer(effects, hatsu, origin, target, damage);
         break;
     case nen::Type::Transmuter:
         SpawnTransmuter(effects, hatsu, origin, target, damage);
@@ -207,8 +213,14 @@ AttackOutcome UpdateAttackEffects(std::vector<AttackEffect> *effects, float dt,
         case nen::Type::Conjurer:
             effect.position.x += effect.velocity.x * dt;
             effect.position.y += effect.velocity.y * dt;
-            effect.velocity.x *= 0.992F;
-            effect.velocity.y *= 0.992F;
+            if (effect.homingStrength > 0.001F) {
+                const Vector2 toTarget = NormalizeSafe(
+                    {effect.target.x - effect.position.x, effect.target.y - effect.position.y});
+                effect.velocity.x += toTarget.x * effect.homingStrength * 170.0F * dt;
+                effect.velocity.y += toTarget.y * effect.homingStrength * 170.0F * dt;
+            }
+            effect.velocity.x *= 0.988F;
+            effect.velocity.y *= 0.988F;
             break;
         case nen::Type::Manipulator:
             effect.velocity = Rotate(effect.velocity, 0.92F * dt);
