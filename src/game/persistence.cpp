@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <fstream>
 
+#include "nen/hatsu.hpp"
+
 namespace game {
 
 namespace {
@@ -41,6 +43,8 @@ bool ParseCharacter(std::ifstream *file, nen::Character *outCharacter) {
     std::string name;
     int typeValue = 1;
     int auraPool = 100;
+    std::string hatsuName;
+    int hatsuPotency = 100;
 
     while (std::getline(*file, line)) {
         const std::size_t split = line.find('=');
@@ -64,6 +68,14 @@ bool ParseCharacter(std::ifstream *file, nen::Character *outCharacter) {
             } catch (...) {
                 return false;
             }
+        } else if (key == "hatsu_name") {
+            hatsuName = value;
+        } else if (key == "hatsu_potency") {
+            try {
+                hatsuPotency = std::stoi(value);
+            } catch (...) {
+                return false;
+            }
         }
     }
 
@@ -75,7 +87,13 @@ bool ParseCharacter(std::ifstream *file, nen::Character *outCharacter) {
         .name = name,
         .naturalType = static_cast<nen::Type>(typeValue),
         .auraPool = auraPool,
+        .hatsuName = hatsuName,
+        .hatsuPotency = hatsuPotency,
     };
+    if (outCharacter->hatsuName.empty()) {
+        outCharacter->hatsuName =
+            nen::GenerateHatsuName(outCharacter->name, outCharacter->naturalType);
+    }
     return true;
 }
 
@@ -112,6 +130,8 @@ bool SaveCharacter(const nen::Character &character, const std::filesystem::path 
     file << "name=" << character.name << '\n';
     file << "type=" << static_cast<int>(character.naturalType) << '\n';
     file << "aura=" << character.auraPool << '\n';
+    file << "hatsu_name=" << character.hatsuName << '\n';
+    file << "hatsu_potency=" << character.hatsuPotency << '\n';
     return true;
 }
 

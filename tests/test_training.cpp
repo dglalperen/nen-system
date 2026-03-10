@@ -3,6 +3,7 @@
 
 #include "nen/affinity.hpp"
 #include "nen/combat.hpp"
+#include "nen/hatsu.hpp"
 #include "nen/quiz.hpp"
 #include "nen/training.hpp"
 #include "nen/types.hpp"
@@ -50,6 +51,12 @@ int main() {
            "quiz resolver should choose the highest score");
     Expect(!nen::WaterDivinationEffect(nen::Type::Specialist).empty(),
            "water divination reveal text should exist");
+
+    const std::string hatsuNameA = nen::GenerateHatsuName("alperen", nen::Type::Manipulator);
+    const std::string hatsuNameB = nen::GenerateHatsuName("alperen", nen::Type::Manipulator);
+    Expect(hatsuNameA == hatsuNameB, "hatsu naming should be deterministic for same input");
+    const int potency = nen::GenerateHatsuPotency("alperen");
+    Expect(potency >= 90 && potency <= 130, "hatsu potency should remain in expected range");
 
     std::cout << "All tests passed.\n";
     return 0;

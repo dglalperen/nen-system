@@ -9,6 +9,8 @@ Prototype a simplified Nen training sandbox that supports experimentation and fu
 - Character has:
   - `naturalType`
   - `auraPool`
+  - `hatsuName`
+  - `hatsuPotency`
 - New characters are assigned a natural type using a personality quiz.
 - Reveal uses a water divination scene tied to the resulting type.
 - Affinity efficiency by ring distance:
@@ -16,10 +18,13 @@ Prototype a simplified Nen training sandbox that supports experimentation and fu
   - adjacent: 80%
   - two steps away: 60%
   - opposite: 40%
-- Training in a zone grants aura based on efficiency.
+- Aura is recovered by channeling (hold recharge action).
 - Combat uses a type modifier:
   - same type attacks are strongest
   - farther types are progressively weaker
+- Each type has a specific base attack behavior and visual identity.
+- Each character has a deterministic unique hatsu name and potency.
+- Manipulator attacks can apply control effects (manipulated and vulnerable states).
 
 ## Why This Simplification
 

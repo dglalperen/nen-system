@@ -42,6 +42,7 @@ endfunction()
 add_library(nen_core
     src/nen/affinity.cpp
     src/nen/combat.cpp
+    src/nen/hatsu.cpp
     src/nen/quiz.cpp
     src/nen/training.cpp
 )

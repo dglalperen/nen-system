@@ -37,12 +37,13 @@ Controls:
 
 - Main menu: create new character or load existing save
 - New character flow: enter name -> answer personality quiz -> water divination reveal
+- Keyboard + mouse navigation for menu and quiz options
 - `WASD` or arrow keys: move in world
-- `E`: train in active zone (gains aura based on Nen efficiency)
-- `1-6`: choose attack Nen type
-- `SPACE`: cast animated aura attacks at dummy (visuals + behavior vary by Nen type)
+- `SPACE` or left mouse button: cast base Nen attack
+- `Q` or right mouse button: cast your character's unique hatsu
+- Hold `R`: recharge aura with channeling animation
 - `F5`: manual save
-- `ESC`: quit
+- `ESC`: back to menu (or quit from main menu)
 
 Saved characters are stored in `~/.nen_world/characters`.
 
@@ -93,8 +94,10 @@ This is currently a Tier 1 prototype:
 - interactive 2D world with state-driven UI flow
 - character create/load persistence
 - personality-based Nen type assignment + water divination reveal
-- Nen affinity training loop (`E`)
-- type-scaled combat damage modifiers (`SPACE`)
+- unique hatsu identity per character (name + potency)
+- animated type-specific base attacks + hatsu attacks
+- manipulation/vulnerability combat effects (Manipulator-type control fantasy)
+- aura economy loop (spend aura in combat, recover by channeling)
 
 Next milestone is Tier 2:
 

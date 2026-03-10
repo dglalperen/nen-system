@@ -1,6 +1,5 @@
 #pragma once
 
-#include <string>
 #include <vector>
 
 #include <raylib.h>
@@ -11,6 +10,7 @@ namespace game {
 
 struct AttackEffect {
     nen::Type type;
+    bool hatsu;
     Vector2 origin;
     Vector2 position;
     Vector2 velocity;
@@ -20,13 +20,24 @@ struct AttackEffect {
     float phase;
     int damage;
     bool hasHit;
+    float manipulationSeconds;
+    float vulnerabilitySeconds;
 };
 
-void SpawnAttackEffect(std::vector<AttackEffect> *effects, nen::Type attackType, Vector2 origin,
-                       Vector2 target, int damage);
+struct AttackOutcome {
+    int damage = 0;
+    float manipulationSeconds = 0.0F;
+    float vulnerabilitySeconds = 0.0F;
+};
 
-int UpdateAttackEffects(std::vector<AttackEffect> *effects, float dt, Vector2 targetCenter,
-                        float targetRadius);
+void SpawnBaseAttack(std::vector<AttackEffect> *effects, nen::Type attackType, Vector2 origin,
+                     Vector2 target, int damage);
+
+void SpawnHatsuAttack(std::vector<AttackEffect> *effects, nen::Type attackType, Vector2 origin,
+                      Vector2 target, int damage);
+
+AttackOutcome UpdateAttackEffects(std::vector<AttackEffect> *effects, float dt,
+                                  Vector2 targetCenter, float targetRadius);
 
 void DrawAttackEffects(const std::vector<AttackEffect> &effects);
 

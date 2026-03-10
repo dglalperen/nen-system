@@ -11,21 +11,26 @@
 
 #include "game/attack_system.hpp"
 #include "game/persistence.hpp"
-#include "nen/affinity.hpp"
 #include "nen/combat.hpp"
+#include "nen/hatsu.hpp"
 #include "nen/quiz.hpp"
-#include "nen/training.hpp"
 #include "nen/types.hpp"
 
 namespace game {
 
 namespace {
 
-constexpr int kWidth = 1100;
-constexpr int kHeight = 640;
-constexpr int kDummyMaxHealth = 220;
-constexpr int kAttackAuraCost = 16;
-constexpr int kAttackBasePower = 28;
+constexpr int kWidth = 1560;
+constexpr int kHeight = 920;
+constexpr int kAuraMax = 2400;
+constexpr int kEnemyMaxHealth = 430;
+
+constexpr int kBaseAttackAuraCost = 16;
+constexpr int kHatsuAuraCost = 52;
+constexpr int kBaseAttackPower = 25;
+constexpr int kHatsuAttackPower = 44;
+
+const Rectangle kArenaBounds{40.0F, 110.0F, 1020.0F, 730.0F};
 
 enum class Screen {
     MainMenu,
@@ -36,10 +41,15 @@ enum class Screen {
     World,
 };
 
-struct TrainingZone {
-    nen::Type type;
-    Rectangle area;
-    Color color;
+struct EnemyState {
+    Vector2 position{810.0F, 450.0F};
+    Vector2 velocity{180.0F, 120.0F};
+    float radius = 42.0F;
+    int maxHealth = kEnemyMaxHealth;
+    int health = kEnemyMaxHealth;
+    float manipulatedTimer = 0.0F;
+    float vulnerabilityTimer = 0.0F;
+    float hitFlashTimer = 0.0F;
 };
 
 struct AppState {
@@ -61,16 +71,16 @@ struct AppState {
         .auraPool = 120,
     };
     bool hasCharacter = false;
-    Vector2 playerPosition{520.0F, 520.0F};
-    Vector2 playerSize{20.0F, 20.0F};
-    nen::Type selectedAttackType = nen::Type::Enhancer;
+    Vector2 playerPosition{kArenaBounds.x + 110.0F, kArenaBounds.y + kArenaBounds.height - 130.0F};
+    Vector2 playerSize{36.0F, 52.0F};
+    bool chargingAura = false;
+    float chargeEffectTimer = 0.0F;
 
+    float baseAttackCooldown = 0.0F;
+    float hatsuCooldown = 0.0F;
     std::vector<AttackEffect> activeAttacks;
-    float attackCooldown = 0.0F;
-    Vector2 dummyCenter{845.0F, 445.0F};
-    float dummyRadius = 38.0F;
-    int dummyHealth = kDummyMaxHealth;
-    int activeZoneIndex = -1;
+    EnemyState enemy;
+
     std::string statusMessage = "Select New Character or Load Character.";
 };
 
@@ -92,17 +102,20 @@ Color TypeColor(nen::Type type) {
     return RAYWHITE;
 }
 
-std::array<TrainingZone, 6> BuildZones() {
-    return {{
-        {nen::Type::Enhancer, {30.0F, 130.0F, 180.0F, 130.0F}, TypeColor(nen::Type::Enhancer)},
-        {nen::Type::Transmuter, {230.0F, 130.0F, 180.0F, 130.0F}, TypeColor(nen::Type::Transmuter)},
-        {nen::Type::Emitter, {430.0F, 130.0F, 180.0F, 130.0F}, TypeColor(nen::Type::Emitter)},
-        {nen::Type::Conjurer, {30.0F, 280.0F, 180.0F, 130.0F}, TypeColor(nen::Type::Conjurer)},
-        {nen::Type::Manipulator,
-         {230.0F, 280.0F, 180.0F, 130.0F},
-         TypeColor(nen::Type::Manipulator)},
-        {nen::Type::Specialist, {430.0F, 280.0F, 180.0F, 130.0F}, TypeColor(nen::Type::Specialist)},
-    }};
+bool IsInside(const Rectangle &rect, Vector2 point) { return CheckCollisionPointRec(point, rect); }
+
+bool IsButtonTriggered(const Rectangle &rect) {
+    return IsInside(rect, GetMousePosition()) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
+void DrawButton(const Rectangle &rect, const std::string &label, bool selected) {
+    const bool hovered = IsInside(rect, GetMousePosition());
+    const Color fill = selected || hovered ? Color{57, 87, 143, 255} : Color{32, 50, 82, 255};
+    DrawRectangleRounded(rect, 0.2F, 8, fill);
+    DrawRectangleRoundedLinesEx(rect, 0.2F, 8, 2.0F,
+                                selected || hovered ? WHITE : Fade(WHITE, 0.5F));
+    DrawText(label.c_str(), static_cast<int>(rect.x + 18.0F),
+             static_cast<int>(rect.y + rect.height * 0.28F), 28, RAYWHITE);
 }
 
 void HandleNameInput(std::string *text) {
@@ -113,6 +126,7 @@ void HandleNameInput(std::string *text) {
         }
         key = GetCharPressed();
     }
+
     if (IsKeyPressed(KEY_BACKSPACE) && !text->empty()) {
         text->pop_back();
     }
@@ -143,50 +157,82 @@ void StartWorld(AppState *app, const nen::Character &character) {
     app->screen = Screen::World;
     app->player = character;
     app->hasCharacter = true;
-    app->selectedAttackType = character.naturalType;
-    app->playerPosition = {560.0F, 520.0F};
-    app->dummyHealth = kDummyMaxHealth;
-    app->activeZoneIndex = -1;
+    app->playerPosition = {kArenaBounds.x + 110.0F, kArenaBounds.y + kArenaBounds.height - 130.0F};
+    app->chargingAura = false;
+    app->chargeEffectTimer = 0.0F;
+    app->baseAttackCooldown = 0.0F;
+    app->hatsuCooldown = 0.0F;
     app->activeAttacks.clear();
-    app->attackCooldown = 0.0F;
-    app->statusMessage =
-        "Move with WASD. E trains aura in a zone. SPACE casts animated Nen attack.";
+    app->enemy = EnemyState{};
+    app->statusMessage = "LMB/SPACE base attack, RMB/Q hatsu, hold R to recover aura.";
 }
 
-void UpdateMainMenu(AppState *app) {
-    if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W)) {
-        app->menuSelection = (app->menuSelection + 1) % 2;
+void EnsureCharacterHasHatsu(nen::Character *character) {
+    if (character == nullptr) {
+        return;
     }
-    if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S)) {
-        app->menuSelection = (app->menuSelection + 1) % 2;
+    if (character->hatsuName.empty()) {
+        character->hatsuName = nen::GenerateHatsuName(character->name, character->naturalType);
+    }
+    if (character->hatsuPotency < 80 || character->hatsuPotency > 150) {
+        character->hatsuPotency = nen::GenerateHatsuPotency(character->name);
+    }
+}
+
+void UpdateMainMenu(AppState *app, bool *running) {
+    if (IsKeyPressed(KEY_ESCAPE)) {
+        *running = false;
+        return;
     }
 
-    if (IsKeyPressed(KEY_ENTER)) {
-        if (app->menuSelection == 0) {
-            app->screen = Screen::NameEntry;
-            app->draftName.clear();
-            app->statusMessage = "Type your character name, then press ENTER.";
-        } else {
-            app->screen = Screen::LoadCharacter;
-            RefreshStoredCharacters(app);
-            if (app->storedCharacters.empty()) {
-                app->statusMessage = "No saved character found. Create one first.";
-            } else {
-                app->statusMessage = "Select a saved character and press ENTER.";
-            }
-        }
+    const Rectangle newButton{86.0F, 262.0F, 420.0F, 74.0F};
+    const Rectangle loadButton{86.0F, 354.0F, 420.0F, 74.0F};
+
+    if (IsInside(newButton, GetMousePosition())) {
+        app->menuSelection = 0;
+    } else if (IsInside(loadButton, GetMousePosition())) {
+        app->menuSelection = 1;
+    }
+
+    if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W)) {
+        app->menuSelection = std::max(0, app->menuSelection - 1);
+    }
+    if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S)) {
+        app->menuSelection = std::min(1, app->menuSelection + 1);
+    }
+
+    const bool chooseNew =
+        IsButtonTriggered(newButton) || (app->menuSelection == 0 && IsKeyPressed(KEY_ENTER));
+    const bool chooseLoad =
+        IsButtonTriggered(loadButton) || (app->menuSelection == 1 && IsKeyPressed(KEY_ENTER));
+
+    if (chooseNew) {
+        app->screen = Screen::NameEntry;
+        app->draftName.clear();
+        app->statusMessage = "Enter a name, then continue.";
+        return;
+    }
+    if (chooseLoad) {
+        app->screen = Screen::LoadCharacter;
+        RefreshStoredCharacters(app);
+        app->statusMessage =
+            app->storedCharacters.empty() ? "No saves found yet." : "Choose a saved character.";
     }
 }
 
 void UpdateNameEntry(AppState *app) {
     HandleNameInput(&app->draftName);
 
-    if (IsKeyPressed(KEY_ESCAPE)) {
+    const Rectangle continueButton{86.0F, 346.0F, 300.0F, 62.0F};
+    const Rectangle backButton{402.0F, 346.0F, 184.0F, 62.0F};
+
+    if (IsKeyPressed(KEY_ESCAPE) || IsButtonTriggered(backButton)) {
         app->screen = Screen::MainMenu;
         return;
     }
 
-    if (!IsKeyPressed(KEY_ENTER)) {
+    const bool continuePressed = IsButtonTriggered(continueButton) || IsKeyPressed(KEY_ENTER);
+    if (!continuePressed) {
         return;
     }
     if (app->draftName.empty()) {
@@ -197,7 +243,7 @@ void UpdateNameEntry(AppState *app) {
     app->quizScores.fill(0);
     app->quizQuestionIndex = 0;
     app->screen = Screen::Quiz;
-    app->statusMessage = "Answer the personality quiz with keys 1, 2, or 3.";
+    app->statusMessage = "Answer with 1/2/3 or click.";
 }
 
 void UpdateLoadCharacter(AppState *app) {
@@ -220,8 +266,27 @@ void UpdateLoadCharacter(AppState *app) {
             (app->loadSelection + 1) % static_cast<int>(app->storedCharacters.size());
     }
 
+    int clickedIndex = -1;
+    int y = 210;
+    for (std::size_t i = 0; i < app->storedCharacters.size(); ++i) {
+        const Rectangle row{80.0F, static_cast<float>(y), 640.0F, 40.0F};
+        if (IsInside(row, GetMousePosition())) {
+            app->loadSelection = static_cast<int>(i);
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                clickedIndex = static_cast<int>(i);
+            }
+        }
+        y += 48;
+    }
+
     if (IsKeyPressed(KEY_ENTER)) {
-        StartWorld(app, app->storedCharacters[app->loadSelection].character);
+        clickedIndex = app->loadSelection;
+    }
+
+    if (clickedIndex >= 0) {
+        EnsureCharacterHasHatsu(
+            &app->storedCharacters[static_cast<std::size_t>(clickedIndex)].character);
+        StartWorld(app, app->storedCharacters[static_cast<std::size_t>(clickedIndex)].character);
         app->statusMessage = "Loaded " + app->player.name + ".";
     }
 }
@@ -233,23 +298,36 @@ void UpdateQuiz(AppState *app) {
     }
 
     const auto &questions = nen::PersonalityQuestions();
-    int answerIndex = -1;
+    const auto &question = questions[app->quizQuestionIndex];
 
+    std::array<Rectangle, 3> optionRects{{
+        {86.0F, 312.0F, 920.0F, 62.0F},
+        {86.0F, 392.0F, 920.0F, 62.0F},
+        {86.0F, 472.0F, 920.0F, 62.0F},
+    }};
+
+    int answerIndex = -1;
     if (IsKeyPressed(KEY_ONE)) {
         answerIndex = 0;
     } else if (IsKeyPressed(KEY_TWO)) {
         answerIndex = 1;
     } else if (IsKeyPressed(KEY_THREE)) {
         answerIndex = 2;
+    } else {
+        for (int i = 0; i < 3; ++i) {
+            if (IsButtonTriggered(optionRects[static_cast<std::size_t>(i)])) {
+                answerIndex = i;
+                break;
+            }
+        }
     }
 
     if (answerIndex < 0) {
         return;
     }
 
-    nen::ApplyQuizAnswer(&app->quizScores, questions[app->quizQuestionIndex].options[answerIndex]);
+    nen::ApplyQuizAnswer(&app->quizScores, question.options[static_cast<std::size_t>(answerIndex)]);
     app->quizQuestionIndex += 1;
-
     if (app->quizQuestionIndex < questions.size()) {
         return;
     }
@@ -257,44 +335,91 @@ void UpdateQuiz(AppState *app) {
     app->player = nen::Character{
         .name = app->draftName,
         .naturalType = nen::DetermineNenType(app->quizScores),
-        .auraPool = 120,
+        .auraPool = 180,
     };
+    EnsureCharacterHasHatsu(&app->player);
     app->hasCharacter = true;
-    app->selectedAttackType = app->player.naturalType;
     app->revealTimer = 0.0F;
     app->screen = Screen::Reveal;
-    app->statusMessage = "Water divination complete. Press ENTER to enter the world.";
+    app->statusMessage = "Divination complete. Continue to world.";
 }
 
 void UpdateReveal(AppState *app, float dt) {
     app->revealTimer += dt;
-    if (app->revealTimer >= 1.5F && IsKeyPressed(KEY_ENTER)) {
+    const Rectangle continueButton{86.0F, 716.0F, 340.0F, 66.0F};
+    if (app->revealTimer < 1.1F) {
+        return;
+    }
+    if (IsKeyPressed(KEY_ENTER) || IsButtonTriggered(continueButton)) {
         StartWorld(app, app->player);
         SaveCurrentCharacter(app);
         RefreshStoredCharacters(app);
     }
 }
 
-void UpdateAttackTypeHotkeys(AppState *app) {
-    if (IsKeyPressed(KEY_ONE)) {
-        app->selectedAttackType = nen::Type::Enhancer;
-    } else if (IsKeyPressed(KEY_TWO)) {
-        app->selectedAttackType = nen::Type::Transmuter;
-    } else if (IsKeyPressed(KEY_THREE)) {
-        app->selectedAttackType = nen::Type::Emitter;
-    } else if (IsKeyPressed(KEY_FOUR)) {
-        app->selectedAttackType = nen::Type::Conjurer;
-    } else if (IsKeyPressed(KEY_FIVE)) {
-        app->selectedAttackType = nen::Type::Manipulator;
-    } else if (IsKeyPressed(KEY_SIX)) {
-        app->selectedAttackType = nen::Type::Specialist;
+Vector2 EnemyCenter(const AppState &app) { return app.enemy.position; }
+
+void MoveEnemy(AppState *app, float dt) {
+    EnemyState &enemy = app->enemy;
+    enemy.hitFlashTimer = std::max(0.0F, enemy.hitFlashTimer - dt);
+    enemy.manipulatedTimer = std::max(0.0F, enemy.manipulatedTimer - dt);
+    enemy.vulnerabilityTimer = std::max(0.0F, enemy.vulnerabilityTimer - dt);
+
+    if (enemy.manipulatedTimer > 0.0F) {
+        const Vector2 toPlayer{app->playerPosition.x - enemy.position.x,
+                               app->playerPosition.y - enemy.position.y};
+        const float distance = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
+        Vector2 dir = {0.0F, 0.0F};
+        if (distance > 0.001F) {
+            dir = {toPlayer.x / distance, toPlayer.y / distance};
+        }
+        enemy.velocity.x *= 0.92F;
+        enemy.velocity.y *= 0.92F;
+        enemy.position.x += dir.x * 105.0F * dt;
+        enemy.position.y += dir.y * 105.0F * dt;
+    } else {
+        enemy.position.x += enemy.velocity.x * dt;
+        enemy.position.y += enemy.velocity.y * dt;
+    }
+
+    const float left = kArenaBounds.x + enemy.radius;
+    const float right = kArenaBounds.x + kArenaBounds.width - enemy.radius;
+    const float top = kArenaBounds.y + enemy.radius;
+    const float bottom = kArenaBounds.y + kArenaBounds.height - enemy.radius;
+
+    if (enemy.position.x < left) {
+        enemy.position.x = left;
+        enemy.velocity.x = std::abs(enemy.velocity.x);
+    }
+    if (enemy.position.x > right) {
+        enemy.position.x = right;
+        enemy.velocity.x = -std::abs(enemy.velocity.x);
+    }
+    if (enemy.position.y < top) {
+        enemy.position.y = top;
+        enemy.velocity.y = std::abs(enemy.velocity.y);
+    }
+    if (enemy.position.y > bottom) {
+        enemy.position.y = bottom;
+        enemy.velocity.y = -std::abs(enemy.velocity.y);
     }
 }
 
-void UpdateMovement(AppState *app, float dt) {
-    constexpr float kSpeed = 240.0F;
-    Vector2 movement{0.0F, 0.0F};
+void ClampPlayerToArena(AppState *app) {
+    const float left = kArenaBounds.x + 8.0F;
+    const float right = kArenaBounds.x + kArenaBounds.width - app->playerSize.x - 8.0F;
+    const float top = kArenaBounds.y + 8.0F;
+    const float bottom = kArenaBounds.y + kArenaBounds.height - app->playerSize.y - 8.0F;
+    app->playerPosition.x = std::clamp(app->playerPosition.x, left, right);
+    app->playerPosition.y = std::clamp(app->playerPosition.y, top, bottom);
+}
 
+void UpdatePlayerMovement(AppState *app, float dt) {
+    if (app->chargingAura) {
+        return;
+    }
+
+    Vector2 movement{0.0F, 0.0F};
     if (IsKeyDown(KEY_W) || IsKeyDown(KEY_UP)) {
         movement.y -= 1.0F;
     }
@@ -314,78 +439,145 @@ void UpdateMovement(AppState *app, float dt) {
         movement.y /= length;
     }
 
-    app->playerPosition.x = std::clamp(app->playerPosition.x + movement.x * kSpeed * dt, 0.0F,
-                                       static_cast<float>(kWidth) - app->playerSize.x);
-    app->playerPosition.y = std::clamp(app->playerPosition.y + movement.y * kSpeed * dt, 95.0F,
-                                       static_cast<float>(kHeight) - app->playerSize.y - 45.0F);
+    const float speed = 320.0F;
+    app->playerPosition.x += movement.x * speed * dt;
+    app->playerPosition.y += movement.y * speed * dt;
+    ClampPlayerToArena(app);
 }
 
-void UpdateWorld(AppState *app, float dt, const std::array<TrainingZone, 6> &zones) {
-    UpdateAttackTypeHotkeys(app);
-    UpdateMovement(app, dt);
-    app->attackCooldown = std::max(0.0F, app->attackCooldown - dt);
-
-    const Rectangle playerRect{app->playerPosition.x, app->playerPosition.y, app->playerSize.x,
-                               app->playerSize.y};
-    app->activeZoneIndex = -1;
-    for (std::size_t i = 0; i < zones.size(); ++i) {
-        if (CheckCollisionRecs(playerRect, zones[i].area)) {
-            app->activeZoneIndex = static_cast<int>(i);
-            break;
-        }
+void RechargeAura(AppState *app, float dt) {
+    const bool holdRecharge = IsKeyDown(KEY_R) || IsMouseButtonDown(MOUSE_BUTTON_MIDDLE);
+    app->chargingAura = holdRecharge;
+    if (!holdRecharge) {
+        return;
     }
 
-    if (app->activeZoneIndex >= 0 && IsKeyPressed(KEY_E)) {
-        const nen::Type zoneType = zones[static_cast<std::size_t>(app->activeZoneIndex)].type;
-        const int efficiency = nen::EfficiencyPercent(app->player.naturalType, zoneType);
-        const int gainedAura = std::max(2, efficiency / 12);
-        app->player.auraPool = std::min(2200, app->player.auraPool + gainedAura);
-        app->statusMessage = "Training in " + std::string(nen::ToString(zoneType)) +
-                             " zone gave +" + std::to_string(gainedAura) +
-                             " aura (E uses type efficiency).";
+    app->chargeEffectTimer += dt;
+    const float typeBonus = app->player.naturalType == nen::Type::Enhancer ? 8.0F : 0.0F;
+    const int gain = static_cast<int>(std::floor((39.0F + typeBonus) * dt));
+    app->player.auraPool = std::min(kAuraMax, app->player.auraPool + std::max(1, gain));
+    app->statusMessage = "Channeling aura... hold R to recover.";
+}
+
+void CastBaseAttack(AppState *app, Vector2 target) {
+    if (app->baseAttackCooldown > 0.0F) {
+        app->statusMessage = "Base attack recharging.";
+        return;
+    }
+    if (!nen::TryConsumeAura(&app->player, kBaseAttackAuraCost)) {
+        app->statusMessage = "Not enough aura for base attack.";
+        return;
+    }
+
+    const Vector2 origin{app->playerPosition.x + app->playerSize.x * 0.5F,
+                         app->playerPosition.y + app->playerSize.y * 0.38F};
+    const int damage = nen::ComputeAttackDamage(app->player.naturalType, app->player.naturalType,
+                                                kBaseAttackPower);
+    SpawnBaseAttack(&app->activeAttacks, app->player.naturalType, origin, target, damage);
+    app->baseAttackCooldown = 0.24F;
+    app->statusMessage = "Base aura attack cast.";
+}
+
+void CastHatsu(AppState *app, Vector2 target) {
+    if (app->hatsuCooldown > 0.0F) {
+        app->statusMessage = "Hatsu still cooling down.";
+        return;
+    }
+    if (!nen::TryConsumeAura(&app->player, kHatsuAuraCost)) {
+        app->statusMessage = "Not enough aura for hatsu.";
+        return;
+    }
+
+    const Vector2 origin{app->playerPosition.x + app->playerSize.x * 0.5F,
+                         app->playerPosition.y + app->playerSize.y * 0.3F};
+    const int potency = std::max(70, app->player.hatsuPotency);
+    const int damage = static_cast<int>(
+        std::round(nen::ComputeAttackDamage(app->player.naturalType, app->player.naturalType,
+                                            kHatsuAttackPower) *
+                   (static_cast<float>(potency) / 100.0F)));
+
+    SpawnHatsuAttack(&app->activeAttacks, app->player.naturalType, origin, target, damage);
+    app->hatsuCooldown = 2.8F;
+    app->statusMessage = "Hatsu activated: " + app->player.hatsuName;
+}
+
+void ApplyAttackOutcome(AppState *app, const AttackOutcome &outcome) {
+    if (outcome.damage <= 0 && outcome.manipulationSeconds <= 0.0F &&
+        outcome.vulnerabilitySeconds <= 0.0F) {
+        return;
+    }
+
+    if (outcome.manipulationSeconds > 0.0F) {
+        app->enemy.manipulatedTimer =
+            std::max(app->enemy.manipulatedTimer, outcome.manipulationSeconds);
+        app->statusMessage = "Manipulator control effect applied.";
+    }
+    if (outcome.vulnerabilitySeconds > 0.0F) {
+        app->enemy.vulnerabilityTimer =
+            std::max(app->enemy.vulnerabilityTimer, outcome.vulnerabilitySeconds);
+    }
+
+    int damage = outcome.damage;
+    if (app->enemy.vulnerabilityTimer > 0.0F) {
+        damage = static_cast<int>(std::round(static_cast<float>(damage) * 1.35F));
+    }
+    damage = std::max(0, damage);
+    if (damage <= 0) {
+        return;
+    }
+
+    app->enemy.health = std::max(0, app->enemy.health - damage);
+    app->enemy.hitFlashTimer = 0.12F;
+    app->statusMessage = "Hit for " + std::to_string(damage) + " damage.";
+
+    if (app->enemy.health > 0) {
         SaveCurrentCharacter(app);
+        return;
     }
 
-    const int frameDamage =
-        UpdateAttackEffects(&app->activeAttacks, dt, app->dummyCenter, app->dummyRadius);
-    if (frameDamage > 0) {
-        app->dummyHealth = std::max(0, app->dummyHealth - frameDamage);
-        app->statusMessage = std::string(nen::ToString(app->selectedAttackType)) +
-                             " aura attack connected for " + std::to_string(frameDamage) +
-                             " damage.";
+    app->enemy.health = app->enemy.maxHealth;
+    app->enemy.position = {kArenaBounds.x + kArenaBounds.width - 160.0F,
+                           kArenaBounds.y + 160.0F + static_cast<float>(GetRandomValue(0, 220))};
+    app->enemy.velocity = {static_cast<float>(GetRandomValue(-220, -140)),
+                           static_cast<float>(GetRandomValue(120, 210))};
+    app->player.auraPool = std::min(kAuraMax, app->player.auraPool + 68);
+    app->statusMessage = "Enemy overwhelmed. +68 aura.";
+    SaveCurrentCharacter(app);
+}
 
-        if (app->dummyHealth == 0) {
-            app->dummyHealth = kDummyMaxHealth;
-            app->player.auraPool = std::min(2200, app->player.auraPool + 24);
-            app->statusMessage += " Dummy broken. +24 aura reward.";
-        }
+void UpdateWorld(AppState *app) {
+    const float dt = GetFrameTime();
+
+    if (IsKeyPressed(KEY_ESCAPE)) {
         SaveCurrentCharacter(app);
+        app->screen = Screen::MainMenu;
+        app->statusMessage = "Returned to main menu.";
+        return;
     }
 
-    if (IsKeyPressed(KEY_SPACE)) {
-        if (app->attackCooldown > 0.0F) {
-            app->statusMessage = "Attack is recharging...";
-            return;
-        }
+    app->baseAttackCooldown = std::max(0.0F, app->baseAttackCooldown - dt);
+    app->hatsuCooldown = std::max(0.0F, app->hatsuCooldown - dt);
 
-        if (!nen::TryConsumeAura(&app->player, kAttackAuraCost)) {
-            app->statusMessage =
-                "Not enough aura for attack. Need " + std::to_string(kAttackAuraCost) + ".";
-            return;
-        }
+    RechargeAura(app, dt);
+    UpdatePlayerMovement(app, dt);
+    MoveEnemy(app, dt);
 
-        const Vector2 origin{app->playerPosition.x + app->playerSize.x * 0.5F,
-                             app->playerPosition.y + app->playerSize.y * 0.5F};
-        const int damage = nen::ComputeAttackDamage(app->player.naturalType,
-                                                    app->selectedAttackType, kAttackBasePower);
-        SpawnAttackEffect(&app->activeAttacks, app->selectedAttackType, origin, app->dummyCenter,
-                          damage);
-        app->attackCooldown = 0.22F;
-        app->statusMessage = std::string("Cast ") +
-                             std::string(nen::ToString(app->selectedAttackType)) +
-                             " aura attack. Cost -" + std::to_string(kAttackAuraCost) + " aura.";
-        SaveCurrentCharacter(app);
+    const Vector2 cursor = GetMousePosition();
+    const Vector2 target = IsInside(kArenaBounds, cursor) ? cursor : EnemyCenter(*app);
+
+    const bool baseCast = IsKeyPressed(KEY_SPACE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    const bool hatsuCast = IsKeyPressed(KEY_Q) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
+
+    if (baseCast && !app->chargingAura) {
+        CastBaseAttack(app, target);
     }
+    if (hatsuCast && !app->chargingAura) {
+        CastHatsu(app, target);
+    }
+
+    const AttackOutcome outcome =
+        UpdateAttackEffects(&app->activeAttacks, dt, EnemyCenter(*app), app->enemy.radius);
+    ApplyAttackOutcome(app, outcome);
 
     if (IsKeyPressed(KEY_F5)) {
         SaveCurrentCharacter(app);
@@ -395,233 +587,248 @@ void UpdateWorld(AppState *app, float dt, const std::array<TrainingZone, 6> &zon
 }
 
 void DrawMainMenu(const AppState &app) {
-    DrawText("Nen World Prototype", 64, 60, 46, RAYWHITE);
-    DrawText("Choose an option", 64, 120, 24, LIGHTGRAY);
+    DrawRectangleGradientV(0, 0, kWidth, kHeight, {18, 27, 46, 255}, {11, 18, 34, 255});
+    DrawText("Nen World", 86, 70, 64, RAYWHITE);
+    DrawText("Create or load a hunter profile", 86, 148, 30, LIGHTGRAY);
 
-    const Color firstColor = app.menuSelection == 0 ? WHITE : Fade(WHITE, 0.7F);
-    const Color secondColor = app.menuSelection == 1 ? WHITE : Fade(WHITE, 0.7F);
-    DrawText("New Character", 96, 210, 34, firstColor);
-    DrawText("Load Existing Character", 96, 270, 34, secondColor);
+    const Rectangle newButton{86.0F, 262.0F, 420.0F, 74.0F};
+    const Rectangle loadButton{86.0F, 354.0F, 420.0F, 74.0F};
+    DrawButton(newButton, "New Character", app.menuSelection == 0);
+    DrawButton(loadButton, "Load Character", app.menuSelection == 1);
 
-    DrawText("Use UP/DOWN + ENTER", 96, 340, 20, LIGHTGRAY);
+    DrawText("Keyboard or mouse both supported", 86, 456, 22, Fade(WHITE, 0.82F));
+    DrawText("ESC to quit", 86, 492, 20, Fade(WHITE, 0.7F));
 }
 
 void DrawNameEntry(const AppState &app) {
-    DrawText("Create New Character", 64, 60, 46, RAYWHITE);
-    DrawText("Type your hunter name and press ENTER", 64, 130, 24, LIGHTGRAY);
-    DrawRectangle(64, 210, 500, 54, {19, 29, 48, 255});
-    DrawRectangleLines(64, 210, 500, 54, WHITE);
-    DrawText(app.draftName.c_str(), 80, 225, 28, RAYWHITE);
-    DrawText("ESC: back", 64, 290, 18, LIGHTGRAY);
+    DrawRectangleGradientV(0, 0, kWidth, kHeight, {18, 27, 46, 255}, {10, 18, 33, 255});
+    DrawText("Create New Hunter", 86, 70, 56, RAYWHITE);
+    DrawText("Enter character name", 86, 150, 30, LIGHTGRAY);
+
+    DrawRectangleRounded({86.0F, 234.0F, 500.0F, 68.0F}, 0.2F, 8, {24, 38, 64, 255});
+    DrawRectangleRoundedLinesEx({86.0F, 234.0F, 500.0F, 68.0F}, 0.2F, 8, 2.0F, WHITE);
+    DrawText(app.draftName.c_str(), 106, 254, 34, RAYWHITE);
+
+    DrawButton({86.0F, 346.0F, 300.0F, 62.0F}, "Continue", false);
+    DrawButton({402.0F, 346.0F, 184.0F, 62.0F}, "Back", false);
 }
 
 void DrawLoadCharacter(const AppState &app) {
-    DrawText("Load Existing Character", 64, 60, 46, RAYWHITE);
-    DrawText("Choose a save and press ENTER", 64, 120, 24, LIGHTGRAY);
+    DrawRectangleGradientV(0, 0, kWidth, kHeight, {18, 27, 46, 255}, {10, 18, 33, 255});
+    DrawText("Load Character", 80, 70, 56, RAYWHITE);
 
     if (app.storedCharacters.empty()) {
-        DrawText("No characters saved yet.", 64, 210, 28, LIGHTGRAY);
-        DrawText("Press ESC to return.", 64, 250, 20, LIGHTGRAY);
+        DrawText("No saved characters found.", 80, 210, 30, LIGHTGRAY);
+        DrawText("Press ESC to return.", 80, 252, 24, LIGHTGRAY);
         return;
     }
 
-    int y = 190;
+    int y = 210;
     for (std::size_t i = 0; i < app.storedCharacters.size(); ++i) {
         const bool selected = static_cast<int>(i) == app.loadSelection;
-        const Color color = selected ? WHITE : Fade(WHITE, 0.7F);
-        const auto &character = app.storedCharacters[i].character;
-        const std::string line = character.name + " | " +
-                                 std::string(nen::ToString(character.naturalType)) + " | aura " +
-                                 std::to_string(character.auraPool);
-        DrawText(line.c_str(), 90, y, 24, color);
-        y += 36;
+        const Rectangle row{80.0F, static_cast<float>(y), 640.0F, 40.0F};
+        DrawRectangleRounded(row, 0.2F, 6,
+                             selected ? Color{48, 74, 124, 255} : Color{27, 43, 72, 255});
+        DrawRectangleRoundedLinesEx(row, 0.2F, 6, 2.0F, selected ? WHITE : Fade(WHITE, 0.45F));
+
+        const auto &ch = app.storedCharacters[i].character;
+        const std::string line = ch.name + " | " + std::string(nen::ToString(ch.naturalType)) +
+                                 " | aura " + std::to_string(ch.auraPool);
+        DrawText(line.c_str(), 96, y + 8, 24, RAYWHITE);
+        y += 48;
     }
 }
 
 void DrawQuiz(const AppState &app) {
     const auto &questions = nen::PersonalityQuestions();
     const auto &question = questions[app.quizQuestionIndex];
+    DrawRectangleGradientV(0, 0, kWidth, kHeight, {18, 27, 46, 255}, {10, 18, 33, 255});
 
-    DrawText("Nen Personality Assessment", 64, 52, 42, RAYWHITE);
+    DrawText("Nen Personality Assessment", 86, 66, 52, RAYWHITE);
     DrawText(TextFormat("Question %d / %d", static_cast<int>(app.quizQuestionIndex + 1),
                         static_cast<int>(questions.size())),
-             64, 108, 24, LIGHTGRAY);
+             86, 132, 28, LIGHTGRAY);
 
-    DrawRectangle(64, 152, 960, 86, {25, 35, 57, 255});
-    DrawText(question.prompt.data(), 84, 186, 28, RAYWHITE);
+    DrawRectangleRounded({86.0F, 200.0F, 960.0F, 82.0F}, 0.15F, 6, {24, 38, 64, 255});
+    DrawText(question.prompt.data(), 110, 230, 30, RAYWHITE);
 
-    DrawText("1)", 84, 280, 30, WHITE);
-    DrawText(question.options[0].text.data(), 132, 282, 24, LIGHTGRAY);
-    DrawText("2)", 84, 332, 30, WHITE);
-    DrawText(question.options[1].text.data(), 132, 334, 24, LIGHTGRAY);
-    DrawText("3)", 84, 384, 30, WHITE);
-    DrawText(question.options[2].text.data(), 132, 386, 24, LIGHTGRAY);
+    std::array<Rectangle, 3> optionRects{{
+        {86.0F, 312.0F, 920.0F, 62.0F},
+        {86.0F, 392.0F, 920.0F, 62.0F},
+        {86.0F, 472.0F, 920.0F, 62.0F},
+    }};
+
+    for (int i = 0; i < 3; ++i) {
+        DrawButton(optionRects[static_cast<std::size_t>(i)],
+                   std::to_string(i + 1) + ". " +
+                       std::string(question.options[static_cast<std::size_t>(i)].text),
+                   false);
+    }
 }
 
 void DrawReveal(const AppState &app) {
-    DrawRectangleGradientV(0, 0, kWidth, kHeight, {18, 27, 46, 255}, {10, 18, 33, 255});
-    DrawText("Water Divination", 64, 54, 46, RAYWHITE);
-    DrawText("Your aura has been measured.", 64, 116, 24, LIGHTGRAY);
-
+    DrawRectangleGradientV(0, 0, kWidth, kHeight, {20, 29, 50, 255}, {12, 19, 36, 255});
+    DrawText("Water Divination", 86, 66, 54, RAYWHITE);
     DrawText(TextFormat("%s is a %s!", app.player.name.c_str(),
                         nen::ToString(app.player.naturalType).data()),
-             64, 168, 40, WHITE);
-    DrawText(nen::WaterDivinationEffect(app.player.naturalType).data(), 64, 226, 24, LIGHTGRAY);
+             86, 160, 48, WHITE);
+    DrawText(nen::WaterDivinationEffect(app.player.naturalType).data(), 86, 232, 30, LIGHTGRAY);
+    DrawText(TextFormat("Unique Hatsu: %s", app.player.hatsuName.c_str()), 86, 286, 30, RAYWHITE);
 
-    const Rectangle glass{750.0F, 158.0F, 220.0F, 312.0F};
-    DrawRectangleRounded(glass, 0.04F, 6, Fade({46, 68, 112, 255}, 0.4F));
-    DrawRectangleRoundedLinesEx(glass, 0.04F, 6, 4.0F, WHITE);
+    const Rectangle glass{980.0F, 166.0F, 280.0F, 430.0F};
+    DrawRectangleRounded(glass, 0.06F, 8, Fade({51, 80, 132, 255}, 0.44F));
+    DrawRectangleRoundedLinesEx(glass, 0.06F, 8, 4.0F, WHITE);
 
-    float waterLevel = 132.0F;
+    float waterLevel = 190.0F;
     Color waterBase = {73, 136, 236, 255};
-    Color glowColor = {128, 179, 255, 255};
-    float leafOffset = std::sin(app.revealTimer * 2.5F) * 28.0F;
+    Color glow = TypeColor(app.player.naturalType);
 
     switch (app.player.naturalType) {
     case nen::Type::Enhancer:
-        waterLevel = 132.0F + std::min(130.0F, app.revealTimer * 72.0F);
-        glowColor = {166, 236, 158, 255};
+        waterLevel = 190.0F + std::min(185.0F, app.revealTimer * 78.0F);
         break;
     case nen::Type::Transmuter:
         waterBase = {98, 216, 255, 255};
-        glowColor = {188, 255, 250, 255};
         break;
     case nen::Type::Emitter:
-        waterBase = {144, 124, 255, 255};
-        glowColor = {218, 149, 255, 255};
+        waterBase = {150, 134, 252, 255};
         break;
     case nen::Type::Conjurer:
-        waterBase = {95, 138, 236, 255};
-        glowColor = {198, 170, 255, 255};
+        waterBase = {111, 149, 238, 255};
         break;
     case nen::Type::Manipulator:
-        waterBase = {99, 170, 228, 255};
-        glowColor = {232, 229, 171, 255};
+        waterBase = {101, 170, 228, 255};
         break;
     case nen::Type::Specialist:
-        waterBase = {171, 105, 234, 255};
-        glowColor = {255, 154, 221, 255};
+        waterBase = {166, 104, 234, 255};
         break;
     }
 
-    const Rectangle waterArea{
-        glass.x + 14.0F,
-        glass.y + glass.height - waterLevel - 14.0F,
-        glass.width - 28.0F,
+    const Rectangle water{
+        glass.x + 16.0F,
+        glass.y + glass.height - waterLevel - 16.0F,
+        glass.width - 32.0F,
         waterLevel,
     };
-    DrawRectangleRounded(waterArea, 0.05F, 5, waterBase);
-    DrawRectangleRounded(waterArea, 0.05F, 5, Fade(glowColor, 0.16F));
+    DrawRectangleRounded(water, 0.08F, 8, waterBase);
+    DrawRectangleRounded(water, 0.08F, 8, Fade(glow, 0.2F));
 
-    const int waveSteps = 16;
-    for (int i = 0; i < waveSteps; ++i) {
-        const float t = static_cast<float>(i) / static_cast<float>(waveSteps - 1);
-        const float x = waterArea.x + t * waterArea.width;
-        const float y = waterArea.y + std::sin(t * 8.5F + app.revealTimer * 5.0F) * 5.0F;
-        DrawCircle(static_cast<int>(x), static_cast<int>(y), 2.2F, Fade(WHITE, 0.9F));
+    for (int i = 0; i < 26; ++i) {
+        const float t = static_cast<float>(i) / 25.0F;
+        const float x = water.x + t * water.width;
+        const float y = water.y + std::sin(t * 9.0F + app.revealTimer * 5.0F) * 5.5F;
+        DrawCircle(static_cast<int>(x), static_cast<int>(y), 2.0F, Fade(WHITE, 0.85F));
     }
 
-    DrawRectangle(static_cast<int>(glass.x + 96.0F + leafOffset), static_cast<int>(glass.y + 92.0F),
-                  34, 12, {198, 230, 169, 255});
+    DrawRectangle(
+        static_cast<int>(glass.x + glass.width * 0.5F + std::sin(app.revealTimer * 2.6F) * 36.0F),
+        static_cast<int>(glass.y + 106.0F), 36, 12, {198, 230, 169, 255});
 
-    switch (app.player.naturalType) {
-    case nen::Type::Enhancer:
-        DrawRectangle(static_cast<int>(waterArea.x + 4.0F), static_cast<int>(waterArea.y - 16.0F),
-                      static_cast<int>(waterArea.width - 8.0F), 14, Fade(glowColor, 0.6F));
-        break;
-    case nen::Type::Transmuter:
-        DrawLineEx({waterArea.x + 24.0F, waterArea.y + 30.0F},
-                   {waterArea.x + 98.0F, waterArea.y + 66.0F}, 3.0F, glowColor);
-        DrawLineEx({waterArea.x + 98.0F, waterArea.y + 66.0F},
-                   {waterArea.x + 62.0F, waterArea.y + 90.0F}, 3.0F, glowColor);
-        break;
-    case nen::Type::Emitter:
-        DrawRing({glass.x + glass.width * 0.5F, waterArea.y + 54.0F}, 16.0F, 32.0F, 0.0F, 360.0F,
-                 42, Fade(glowColor, 0.75F));
-        break;
-    case nen::Type::Conjurer:
-        for (int i = 0; i < 5; ++i) {
-            const float px = waterArea.x + 26.0F + static_cast<float>(i) * 32.0F;
-            const float py = waterArea.y + 38.0F + std::sin(app.revealTimer * 2.0F + i) * 8.0F;
-            DrawPoly({px, py}, 4, 6.0F, 45.0F, Fade(glowColor, 0.85F));
-        }
-        break;
-    case nen::Type::Manipulator:
-        DrawLineBezier({waterArea.x + 34.0F, waterArea.y + 30.0F},
-                       {waterArea.x + waterArea.width - 40.0F, waterArea.y + 64.0F}, 2.5F,
-                       Fade(glowColor, 0.85F));
-        break;
-    case nen::Type::Specialist:
-        DrawPoly({glass.x + glass.width * 0.5F, waterArea.y + 52.0F}, 7, 24.0F,
-                 app.revealTimer * 72.0F, Fade(glowColor, 0.8F));
-        DrawCircle(glass.x + glass.width * 0.5F, waterArea.y + 52.0F, 10.0F, Fade(WHITE, 0.7F));
-        break;
-    }
-
-    DrawText("Press ENTER to continue", 64, 520, 24, LIGHTGRAY);
+    DrawButton({86.0F, 716.0F, 340.0F, 66.0F}, "Continue", false);
 }
 
-void DrawWorld(const AppState &app, const std::array<TrainingZone, 6> &zones) {
-    const Rectangle playerRect{app.playerPosition.x, app.playerPosition.y, app.playerSize.x,
-                               app.playerSize.y};
-    const nen::TrainingPlan starterPlan = nen::BuildStarterPlan(app.player.naturalType);
+void DrawPlayer(const AppState &app) {
+    const Vector2 base{app.playerPosition.x, app.playerPosition.y};
+    const Color auraColor = TypeColor(app.player.naturalType);
 
-    DrawRectangle(0, 0, kWidth, 88, {24, 34, 53, 255});
-    DrawText("Nen World - Phase 2 Prototype", 24, 18, 34, RAYWHITE);
-    DrawText("E: train in zone | 1-6: choose attack type | SPACE: cast animated aura attack | F5: "
-             "save | ESC: quit",
-             24, 56, 18, LIGHTGRAY);
+    if (app.chargingAura) {
+        const float t = app.chargeEffectTimer;
+        DrawCircleLines(base.x + 18.0F, base.y + 24.0F, 30.0F + std::sin(t * 5.5F) * 5.0F,
+                        auraColor);
+        DrawCircleLines(base.x + 18.0F, base.y + 24.0F, 42.0F + std::sin(t * 4.2F) * 5.0F,
+                        Fade(auraColor, 0.7F));
+    }
 
-    for (std::size_t i = 0; i < zones.size(); ++i) {
-        const auto &zone = zones[i];
-        const bool active = app.activeZoneIndex == static_cast<int>(i);
-        const Color fill = active ? zone.color : Fade(zone.color, 0.66F);
+    DrawCircle(base.x + 18.0F, base.y + 10.0F, 9.0F, {236, 226, 205, 255});
+    DrawRectangleRounded({base.x + 8.0F, base.y + 20.0F, 20.0F, 24.0F}, 0.3F, 6,
+                         {49, 75, 124, 255});
+    DrawLineEx({base.x + 8.0F, base.y + 28.0F}, {base.x - 1.0F, base.y + 40.0F}, 4.0F,
+               {228, 219, 204, 255});
+    DrawLineEx({base.x + 28.0F, base.y + 28.0F}, {base.x + 37.0F, base.y + 40.0F}, 4.0F,
+               {228, 219, 204, 255});
+    DrawRectangle(base.x + 9.0F, base.y + 44.0F, 7.0F, 10.0F, {218, 210, 194, 255});
+    DrawRectangle(base.x + 20.0F, base.y + 44.0F, 7.0F, 10.0F, {218, 210, 194, 255});
+    DrawCircleLines(base.x + 18.0F, base.y + 26.0F, 25.0F, Fade(auraColor, 0.65F));
+}
 
-        DrawRectangleRec(zone.area, fill);
-        DrawRectangleLinesEx(zone.area, 2.0F, active ? WHITE : Fade(WHITE, 0.45F));
-        DrawText(zone.type == app.selectedAttackType ? "SELECTED ATTACK" : "",
-                 static_cast<int>(zone.area.x) + 10, static_cast<int>(zone.area.y) - 22, 14, WHITE);
-        DrawText(nen::ToString(zone.type).data(), static_cast<int>(zone.area.x) + 12,
-                 static_cast<int>(zone.area.y) + 12, 24, {10, 15, 24, 255});
-        DrawText(TextFormat("%d%%", nen::EfficiencyPercent(app.player.naturalType, zone.type)),
-                 static_cast<int>(zone.area.x) + 12, static_cast<int>(zone.area.y) + 90, 34,
-                 {10, 15, 24, 255});
+void DrawEnemy(const AppState &app) {
+    const EnemyState &enemy = app.enemy;
+    const Color coreColor =
+        enemy.hitFlashTimer > 0.0F ? Color{255, 236, 178, 255} : Color{216, 105, 102, 255};
+    DrawCircleV(enemy.position, enemy.radius, {70, 37, 37, 255});
+    DrawCircleV(enemy.position, enemy.radius * 0.75F, coreColor);
+    DrawCircleLinesV(enemy.position, enemy.radius + 2.0F, Fade(WHITE, 0.85F));
+
+    if (enemy.manipulatedTimer > 0.0F) {
+        DrawCircleLines(enemy.position.x, enemy.position.y, enemy.radius + 10.0F,
+                        {255, 207, 108, 255});
+        DrawLineBezier({enemy.position.x - enemy.radius - 24.0F, enemy.position.y - 30.0F},
+                       {enemy.position.x + enemy.radius + 24.0F, enemy.position.y + 30.0F}, 2.6F,
+                       {255, 207, 108, 255});
+    }
+    if (enemy.vulnerabilityTimer > 0.0F) {
+        DrawCircleLines(enemy.position.x, enemy.position.y, enemy.radius + 16.0F,
+                        {255, 120, 205, 255});
+    }
+}
+
+void DrawWorld(const AppState &app) {
+    DrawRectangleGradientV(0, 0, kWidth, kHeight, {15, 24, 41, 255}, {8, 14, 27, 255});
+
+    DrawRectangleRounded(kArenaBounds, 0.02F, 6, {18, 30, 50, 255});
+    DrawRectangleRoundedLinesEx(kArenaBounds, 0.02F, 6, 3.0F, Fade(WHITE, 0.65F));
+
+    for (int x = 0; x < 20; ++x) {
+        const float px = kArenaBounds.x + 14.0F + static_cast<float>(x) * 50.0F;
+        DrawLine(px, kArenaBounds.y + 10.0F, px, kArenaBounds.y + kArenaBounds.height - 10.0F,
+                 Fade(WHITE, 0.06F));
+    }
+    for (int y = 0; y < 14; ++y) {
+        const float py = kArenaBounds.y + 14.0F + static_cast<float>(y) * 50.0F;
+        DrawLine(kArenaBounds.x + 10.0F, py, kArenaBounds.x + kArenaBounds.width - 10.0F, py,
+                 Fade(WHITE, 0.06F));
     }
 
     DrawAttackEffects(app.activeAttacks);
-    DrawRectangleRec(playerRect, {243, 242, 228, 255});
-    DrawCircleV(app.dummyCenter, app.dummyRadius, {124, 68, 68, 255});
-    DrawCircleLinesV(app.dummyCenter, app.dummyRadius + 2.0F, Fade(WHITE, 0.8F));
-    DrawCircleV(app.dummyCenter, app.dummyRadius * 0.62F, {186, 92, 92, 255});
+    DrawEnemy(app);
+    DrawPlayer(app);
 
-    DrawText(TextFormat("Name: %s", app.player.name.c_str()), 650, 150, 24, RAYWHITE);
-    DrawText(TextFormat("Natural Type: %s", nen::ToString(app.player.naturalType).data()), 650, 184,
-             24, RAYWHITE);
-    DrawText(TextFormat("Aura Pool: %d", app.player.auraPool), 650, 218, 24, RAYWHITE);
-    DrawText(TextFormat("Attack Type: %s", nen::ToString(app.selectedAttackType).data()), 650, 252,
-             24, RAYWHITE);
-    DrawText(TextFormat("Attack Modifier: x%.2f",
-                        static_cast<float>(
-                            nen::DamageModifier(app.player.naturalType, app.selectedAttackType))),
-             650, 286, 24, LIGHTGRAY);
-    DrawText(TextFormat("Cooldown: %.2fs", app.attackCooldown), 650, 314, 20, LIGHTGRAY);
+    const int panelX = 1100;
+    DrawRectangleRounded({static_cast<float>(panelX), 110.0F, 420.0F, 730.0F}, 0.03F, 6,
+                         {22, 34, 56, 255});
+    DrawRectangleRoundedLinesEx({static_cast<float>(panelX), 110.0F, 420.0F, 730.0F}, 0.03F, 6,
+                                2.0F, Fade(WHITE, 0.6F));
 
-    DrawText("Starter Plan", 650, 344, 24, RAYWHITE);
-    DrawText(TextFormat("1) %s", nen::ToString(starterPlan.focusOrder[0].type).data()), 650, 376,
-             20, LIGHTGRAY);
-    DrawText(TextFormat("2) %s", nen::ToString(starterPlan.focusOrder[1].type).data()), 650, 404,
-             20, LIGHTGRAY);
-    DrawText(TextFormat("3) %s", nen::ToString(starterPlan.focusOrder[2].type).data()), 650, 432,
-             20, LIGHTGRAY);
+    DrawText(TextFormat("Name: %s", app.player.name.c_str()), panelX + 20, 138, 28, RAYWHITE);
+    DrawText(TextFormat("Type: %s", nen::ToString(app.player.naturalType).data()), panelX + 20, 174,
+             28, RAYWHITE);
+    DrawText(TextFormat("Aura: %d / %d", app.player.auraPool, kAuraMax), panelX + 20, 210, 28,
+             RAYWHITE);
+    DrawText(TextFormat("Hatsu: %s", app.player.hatsuName.c_str()), panelX + 20, 248, 24,
+             LIGHTGRAY);
+    DrawText(TextFormat("Hatsu Potency: %d", app.player.hatsuPotency), panelX + 20, 278, 24,
+             LIGHTGRAY);
 
-    DrawRectangle(720, 470, 290, 110, {23, 32, 49, 255});
-    DrawRectangleLines(720, 470, 290, 110, Fade(WHITE, 0.7F));
-    DrawText("Training Dummy", 744, 488, 22, RAYWHITE);
-    DrawRectangle(744, 522, 240, 18, {53, 68, 94, 255});
-    const int hpBarWidth = static_cast<int>((240.0F * static_cast<float>(app.dummyHealth)) /
-                                            static_cast<float>(kDummyMaxHealth));
-    DrawRectangle(744, 522, hpBarWidth, 18, {224, 83, 83, 255});
-    DrawText(TextFormat("%d / %d HP", app.dummyHealth, kDummyMaxHealth), 744, 548, 18, LIGHTGRAY);
+    DrawText(TextFormat("Base CD: %.2fs", app.baseAttackCooldown), panelX + 20, 328, 24, LIGHTGRAY);
+    DrawText(TextFormat("Hatsu CD: %.2fs", app.hatsuCooldown), panelX + 20, 358, 24, LIGHTGRAY);
+    DrawText(TextFormat("Enemy HP: %d / %d", app.enemy.health, app.enemy.maxHealth), panelX + 20,
+             388, 24, LIGHTGRAY);
+
+    if (app.enemy.manipulatedTimer > 0.0F) {
+        DrawText(TextFormat("Manipulated: %.2fs", app.enemy.manipulatedTimer), panelX + 20, 420, 24,
+                 {255, 210, 120, 255});
+    }
+    if (app.enemy.vulnerabilityTimer > 0.0F) {
+        DrawText(TextFormat("Vulnerable: %.2fs", app.enemy.vulnerabilityTimer), panelX + 20, 450,
+                 24, {255, 121, 210, 255});
+    }
+
+    DrawText("Controls", panelX + 20, 518, 28, RAYWHITE);
+    DrawText("Move: WASD / Arrows", panelX + 20, 556, 22, LIGHTGRAY);
+    DrawText("Base Attack: LMB or SPACE", panelX + 20, 586, 22, LIGHTGRAY);
+    DrawText("Hatsu: RMB or Q", panelX + 20, 616, 22, LIGHTGRAY);
+    DrawText("Recharge Aura: Hold R", panelX + 20, 646, 22, LIGHTGRAY);
+    DrawText("Save: F5 | Back: ESC", panelX + 20, 676, 22, LIGHTGRAY);
 }
 
 } // namespace
@@ -629,17 +836,19 @@ void DrawWorld(const AppState &app, const std::array<TrainingZone, 6> &zones) {
 int Run() {
     InitWindow(kWidth, kHeight, "Nen World - 2D Prototype");
     SetTargetFPS(60);
+    SetExitKey(KEY_NULL);
 
-    const std::array<TrainingZone, 6> zones = BuildZones();
     AppState app;
     RefreshStoredCharacters(&app);
 
-    while (!WindowShouldClose()) {
+    bool running = true;
+    while (running && !WindowShouldClose()) {
         const float dt = GetFrameTime();
+        (void)dt;
 
         switch (app.screen) {
         case Screen::MainMenu:
-            UpdateMainMenu(&app);
+            UpdateMainMenu(&app, &running);
             break;
         case Screen::NameEntry:
             UpdateNameEntry(&app);
@@ -654,12 +863,12 @@ int Run() {
             UpdateReveal(&app, dt);
             break;
         case Screen::World:
-            UpdateWorld(&app, dt, zones);
+            UpdateWorld(&app);
             break;
         }
 
         BeginDrawing();
-        ClearBackground({16, 23, 36, 255});
+        ClearBackground({14, 21, 36, 255});
 
         switch (app.screen) {
         case Screen::MainMenu:
@@ -678,12 +887,12 @@ int Run() {
             DrawReveal(app);
             break;
         case Screen::World:
-            DrawWorld(app, zones);
+            DrawWorld(app);
             break;
         }
 
-        DrawRectangle(0, kHeight - 42, kWidth, 42, {24, 34, 53, 255});
-        DrawText(app.statusMessage.c_str(), 20, kHeight - 29, 20, {218, 223, 235, 255});
+        DrawRectangle(0, kHeight - 44, kWidth, 44, {23, 35, 58, 255});
+        DrawText(app.statusMessage.c_str(), 22, kHeight - 30, 22, {218, 223, 235, 255});
 
         EndDrawing();
     }
