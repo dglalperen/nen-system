@@ -124,8 +124,10 @@ struct AppState {
     float playerMoveSpeed = 0.0F;
     float proceduralAnimTime = 0.0F;
     float modelBobOffset = 0.0F;
+    float modelStrideOffset = 0.0F;
     float modelLeanDegrees = 0.0F;
     float modelCastLeanDegrees = 0.0F;
+    float modelScalePulse = 0.0F;
     ModelAnimation *playerAnimations = nullptr;
     int playerAnimationCount = 0;
     int idleAnimationIndex = -1;
@@ -488,6 +490,22 @@ int AnimationIndexForState(const AppState &app, AnimState state) {
     return app.idleAnimationIndex;
 }
 
+const char *ToString(AnimState state) {
+    switch (state) {
+    case AnimState::Idle:
+        return "Idle";
+    case AnimState::Move:
+        return "Move";
+    case AnimState::Charge:
+        return "Charge";
+    case AnimState::CastBase:
+        return "CastBase";
+    case AnimState::CastHatsu:
+        return "CastHatsu";
+    }
+    return "Unknown";
+}
+
 void SetAnimationState(AppState *app, AnimState state) {
     if (app == nullptr || app->animationState == state) {
         return;
@@ -650,6 +668,10 @@ void TryLoadPlayerModel(AppState *app) {
     app->playerModelStatus += " | meshes " + std::to_string(selectedMeshes) + "/" +
                               std::to_string(model.meshCount);
     app->playerModelStatus += " | anims " + std::to_string(app->playerAnimationCount);
+    if (app->playerAnimationCount == 0) {
+        app->statusMessage =
+            "Model has no embedded animation clips. Procedural fallback animation enabled.";
+    }
 }
 
 void UnloadPlayerModel(AppState *app) {
@@ -689,8 +711,10 @@ void StartWorld(AppState *app, const nen::Character &character) {
     app->playerMoveSpeed = 0.0F;
     app->proceduralAnimTime = 0.0F;
     app->modelBobOffset = 0.0F;
+    app->modelStrideOffset = 0.0F;
     app->modelLeanDegrees = 0.0F;
     app->modelCastLeanDegrees = 0.0F;
+    app->modelScalePulse = 0.0F;
     app->animationState = AnimState::Idle;
     app->activeAnimationIndex = -1;
     app->activeAnimationFrame = 0.0F;
@@ -1193,12 +1217,23 @@ void UpdateQueuedAction(AppState *app, float dt) {
 void UpdatePlayerAnimation(AppState *app, float dt) {
     const float moveNorm = std::clamp(app->playerMoveSpeed / 320.0F, 0.0F, 1.0F);
     app->proceduralAnimTime += dt * (1.4F + moveNorm * 6.0F);
-    app->modelBobOffset = std::sin(app->proceduralAnimTime) * (0.06F * moveNorm);
+    const float idleWave = std::sin(app->proceduralAnimTime * 1.7F);
+    const float strideWave = std::sin(app->proceduralAnimTime * (3.0F + moveNorm * 2.2F));
+    app->modelBobOffset = idleWave * 0.02F + strideWave * (0.085F * moveNorm);
+    app->modelStrideOffset = strideWave * (0.07F * moveNorm);
     if (app->chargingAura) {
-        app->modelBobOffset += std::sin(app->chargeEffectTimer * 5.4F) * 0.03F;
+        app->modelBobOffset += std::sin(app->chargeEffectTimer * 5.4F) * 0.05F;
     }
-    app->modelLeanDegrees = std::sin(app->proceduralAnimTime * 0.7F) * (8.0F * moveNorm);
-    app->modelCastLeanDegrees = app->queuedAction.queued ? std::sin(app->queuedAction.timer * 14.0F) * 2.5F : 0.0F;
+    app->modelLeanDegrees = std::sin(app->proceduralAnimTime * 0.9F) * (12.0F * moveNorm);
+    app->modelCastLeanDegrees =
+        app->queuedAction.queued ? std::sin(app->queuedAction.timer * 14.0F) * 4.5F : 0.0F;
+    app->modelScalePulse = idleWave * 0.02F + moveNorm * std::sin(app->proceduralAnimTime * 3.2F) * 0.03F;
+    if (app->chargingAura) {
+        app->modelScalePulse += std::sin(app->chargeEffectTimer * 7.4F) * 0.04F;
+    }
+    if (app->queuedAction.queued) {
+        app->modelScalePulse += std::sin(app->queuedAction.timer * 18.0F) * 0.03F;
+    }
 
     AnimState targetState = AnimState::Idle;
     if (app->queuedAction.queued) {
@@ -1756,19 +1791,23 @@ void DrawEnemy3D(const AppState &app) {
 void DrawPlayer3D(const AppState &app) {
     const Vector2 p2 = {app.playerPosition.x + app.playerSize.x * 0.5F,
                         app.playerPosition.y + app.playerSize.y * 0.5F};
-    const Vector3 anchor = ArenaToWorld(p2, 0.75F + app.modelBobOffset);
+    const Vector2 facing2 = Normalize2D(app.facingDirection);
+    const Vector2 strideOffset2D{facing2.x * app.modelStrideOffset, facing2.y * app.modelStrideOffset};
+    const Vector2 render2D{p2.x + strideOffset2D.x, p2.y + strideOffset2D.y};
+    const Vector3 anchor = ArenaToWorld(render2D, 0.75F + app.modelBobOffset);
     const Color aura = TypeColor(app.player.naturalType);
+    const float animatedScale = app.playerModelScale * (1.0F + app.modelScalePulse);
 
     if (app.hasPlayerModel) {
-        const Vector2 facing = Normalize2D(app.facingDirection);
+        const Vector2 facing = facing2;
         const float yawDegrees =
             std::atan2(facing.x, facing.y) * RAD2DEG + app.playerModelYawOffset +
             app.modelLeanDegrees + app.modelCastLeanDegrees;
         const float yaw = yawDegrees * DEG2RAD;
         const Vector3 pivot{
-            -app.playerModelPivot.x * app.playerModelScale,
-            -app.playerModelPivot.y * app.playerModelScale,
-            -app.playerModelPivot.z * app.playerModelScale,
+            -app.playerModelPivot.x * animatedScale,
+            -app.playerModelPivot.y * animatedScale,
+            -app.playerModelPivot.z * animatedScale,
         };
         const Vector3 rotatedPivot{
             pivot.x * std::cos(yaw) - pivot.z * std::sin(yaw),
@@ -1780,11 +1819,11 @@ void DrawPlayer3D(const AppState &app) {
         const Color modelTint = app.chargingAura ? Color{240, 240, 248, 255} : WHITE;
         if (app.chargingAura) {
             DrawModelWiresEx(app.playerModel, drawPos, {0.0F, 1.0F, 0.0F}, yawDegrees,
-                             {app.playerModelScale, app.playerModelScale, app.playerModelScale},
+                             {animatedScale, animatedScale, animatedScale},
                              Fade(WHITE, 0.26F));
         }
         DrawModelEx(app.playerModel, drawPos, {0.0F, 1.0F, 0.0F}, yawDegrees,
-                    {app.playerModelScale, app.playerModelScale, app.playerModelScale}, modelTint);
+                    {animatedScale, animatedScale, animatedScale}, modelTint);
     } else {
         DrawCube({anchor.x, anchor.y + 0.22F, anchor.z}, 0.38F, 0.46F, 0.24F, {48, 74, 123, 255});
         DrawCube({anchor.x - 0.24F, anchor.y + 0.2F, anchor.z}, 0.1F, 0.34F, 0.1F,
@@ -1887,6 +1926,10 @@ void DrawWorld(const AppState &app) {
     y += 26.0F;
     DrawText(TextFormat("Model Scale: %.2f", app.playerModelScale), static_cast<int>(textX),
              static_cast<int>(y), 18, Fade(WHITE, 0.72F));
+    y += 22.0F;
+    const char *animMode = app.playerAnimationCount > 0 ? "clip" : "procedural";
+    DrawText(TextFormat("Anim Mode: %s (%s)", animMode, ToString(app.animationState)),
+             static_cast<int>(textX), static_cast<int>(y), 18, Fade(WHITE, 0.72F));
     y += 22.0F;
     y = DrawWrappedText(app.playerModelStatus, {textX, y, textW, 56.0F}, 17, 1.0F,
                         Fade(WHITE, 0.72F), 2);
