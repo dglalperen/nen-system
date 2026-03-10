@@ -87,6 +87,8 @@ struct AppState {
     float playerModelScale = 1.0F;
     float playerModelYOffset = 0.0F;
     float playerModelYawOffset = 180.0F;
+    std::string playerModelPath;
+    std::string playerModelStatus = "Model not loaded";
     bool use3DView = true;
     Camera3D camera{
         .position = {0.0F, 34.0F, 30.0F},
@@ -207,30 +209,55 @@ void SaveCurrentCharacter(AppState *app) {
     }
 }
 
+std::string ResolveKilluaModelPath() {
+    const std::filesystem::path relative =
+        std::filesystem::path("assets") / "models" / "killua.glb";
+    const std::array<std::filesystem::path, 6> candidates = {
+        relative,
+        std::filesystem::path("..") / relative,
+        std::filesystem::path("../..") / relative,
+        std::filesystem::path("../../..") / relative,
+        std::filesystem::path(GetWorkingDirectory()) / relative,
+        std::filesystem::path(GetApplicationDirectory()) / relative,
+    };
+
+    for (const auto &candidate : candidates) {
+        std::error_code ec;
+        if (std::filesystem::exists(candidate, ec) && !ec) {
+            return std::filesystem::weakly_canonical(candidate, ec).string();
+        }
+    }
+    return {};
+}
+
 void TryLoadPlayerModel(AppState *app) {
     if (app == nullptr) {
         return;
     }
 
-    const std::string modelPath = "assets/models/killua.glb";
-    if (!FileExists(modelPath.c_str())) {
-        app->statusMessage = "3D model not found at assets/models/killua.glb. Using fallback.";
+    const std::string modelPath = ResolveKilluaModelPath();
+    app->playerModelPath = modelPath;
+    if (modelPath.empty()) {
+        app->playerModelStatus = "Killua model not found (checked assets/models/killua.glb paths)";
+        app->statusMessage = "Killua model not found. Using fallback character geometry.";
         return;
     }
 
     Model model = LoadModel(modelPath.c_str());
     if (!IsModelValid(model)) {
-        app->statusMessage = "Could not load killua.glb. Using fallback primitive model.";
+        app->playerModelStatus = "Killua model file found but failed to load";
+        app->statusMessage = "Found killua.glb but loading failed. Using fallback.";
         return;
     }
 
     app->playerModel = model;
     app->hasPlayerModel = true;
+    app->playerModelStatus = "Killua model loaded";
 
     const BoundingBox bounds = GetModelBoundingBox(model);
     const float height = bounds.max.y - bounds.min.y;
     if (height > 0.001F) {
-        app->playerModelScale = 1.75F / height;
+        app->playerModelScale = std::clamp(1.75F / height, 0.02F, 8.0F);
         app->playerModelYOffset = -bounds.min.y * app->playerModelScale;
     } else {
         app->playerModelScale = 1.0F;
@@ -244,6 +271,7 @@ void UnloadPlayerModel(AppState *app) {
     }
     UnloadModel(app->playerModel);
     app->hasPlayerModel = false;
+    app->playerModelStatus = "Model unloaded";
 }
 
 void StartWorld(AppState *app, const nen::Character &character) {
@@ -506,6 +534,42 @@ void MoveEnemy(AppState *app, float dt) {
     }
 }
 
+float Lerp(float a, float b, float t) { return a + (b - a) * t; }
+
+Vector2 Normalize2D(Vector2 vector) {
+    const float len = std::sqrt(vector.x * vector.x + vector.y * vector.y);
+    if (len <= 0.0001F) {
+        return {1.0F, 0.0F};
+    }
+    return {vector.x / len, vector.y / len};
+}
+
+void UpdateCombatCamera(AppState *app, float dt) {
+    if (!app->use3DView) {
+        return;
+    }
+
+    const Vector2 playerCenter{
+        app->playerPosition.x + app->playerSize.x * 0.5F,
+        app->playerPosition.y + app->playerSize.y * 0.5F,
+    };
+    const Vector2 focus2D{
+        (playerCenter.x + app->enemy.position.x) * 0.5F,
+        (playerCenter.y + app->enemy.position.y) * 0.5F,
+    };
+    const Vector3 focus = ArenaToWorld(focus2D, 0.7F);
+    const Vector3 desiredPos{focus.x + 9.5F, 13.5F, focus.z + 14.5F};
+
+    const float follow = std::clamp(dt * 4.0F, 0.01F, 0.25F);
+    app->camera.target.x = Lerp(app->camera.target.x, focus.x, follow);
+    app->camera.target.y = Lerp(app->camera.target.y, focus.y, follow);
+    app->camera.target.z = Lerp(app->camera.target.z, focus.z, follow);
+
+    app->camera.position.x = Lerp(app->camera.position.x, desiredPos.x, follow);
+    app->camera.position.y = Lerp(app->camera.position.y, desiredPos.y, follow);
+    app->camera.position.z = Lerp(app->camera.position.z, desiredPos.z, follow);
+}
+
 void ClampPlayerToArena(AppState *app) {
     const float left = kArenaBounds.x + 8.0F;
     const float right = kArenaBounds.x + kArenaBounds.width - app->playerSize.x - 8.0F;
@@ -685,6 +749,7 @@ void UpdateWorld(AppState *app) {
     RechargeAura(app, dt);
     UpdatePlayerMovement(app, dt);
     MoveEnemy(app, dt);
+    UpdateCombatCamera(app, dt);
 
     Vector2 target = EnemyCenter(*app);
     if (app->use3DView) {
@@ -912,15 +977,36 @@ void DrawArena3D(const AppState &app) {
         {kArenaBounds.x + kArenaBounds.width * 0.5F, kArenaBounds.y + kArenaBounds.height * 0.5F});
     const float width = kArenaBounds.width * kWorldScale;
     const float depth = kArenaBounds.height * kWorldScale;
-    DrawPlane(center, {width, depth}, {20, 33, 56, 255});
+    DrawPlane(center, {width, depth}, {26, 39, 66, 255});
 
-    DrawCubeWires({center.x, 1.5F, center.z}, width, 3.0F, depth, Fade(WHITE, 0.45F));
-    DrawGrid(32, 1.0F);
+    const float wallH = 1.2F;
+    const float wallT = 0.2F;
+    DrawCube({center.x, wallH * 0.5F, center.z - depth * 0.5F}, width, wallH, wallT,
+             {32, 49, 81, 255});
+    DrawCube({center.x, wallH * 0.5F, center.z + depth * 0.5F}, width, wallH, wallT,
+             {32, 49, 81, 255});
+    DrawCube({center.x - width * 0.5F, wallH * 0.5F, center.z}, wallT, wallH, depth,
+             {32, 49, 81, 255});
+    DrawCube({center.x + width * 0.5F, wallH * 0.5F, center.z}, wallT, wallH, depth,
+             {32, 49, 81, 255});
+    DrawCubeWires({center.x, wallH * 0.5F, center.z}, width, wallH, depth, Fade(WHITE, 0.35F));
 
-    DrawSphereWires({center.x, 0.15F, center.z}, 0.22F, 8, 8, Fade(WHITE, 0.25F));
+    for (int i = 0; i < 11; ++i) {
+        const float t = static_cast<float>(i) / 10.0F;
+        const float z = center.z - depth * 0.5F + t * depth;
+        DrawLine3D({center.x - width * 0.5F + 0.2F, 0.02F, z},
+                   {center.x + width * 0.5F - 0.2F, 0.02F, z}, Fade(WHITE, 0.1F));
+    }
+    for (int i = 0; i < 13; ++i) {
+        const float t = static_cast<float>(i) / 12.0F;
+        const float x = center.x - width * 0.5F + t * width;
+        DrawLine3D({x, 0.02F, center.z - depth * 0.5F + 0.2F},
+                   {x, 0.02F, center.z + depth * 0.5F - 0.2F}, Fade(WHITE, 0.08F));
+    }
+
     if (app.chargingAura) {
         const float pulse = 0.18F + std::sin(app.chargeEffectTimer * 5.0F) * 0.05F;
-        DrawSphereWires({center.x, 0.15F, center.z}, pulse, 8, 8, Fade(WHITE, 0.4F));
+        DrawSphereWires({center.x, 0.2F, center.z}, pulse, 8, 8, Fade(WHITE, 0.4F));
     }
 }
 
@@ -930,8 +1016,59 @@ void DrawAttackEffects3D(const AppState &app) {
         const float radius = std::max(0.08F, effect.radius * kWorldScale * 0.65F);
         Color color = TypeColor(effect.type);
         color.a = 220;
-        DrawSphere(pos, radius, color);
-        DrawSphereWires(pos, radius * 1.15F, 8, 8, Fade(WHITE, 0.35F));
+
+        switch (effect.type) {
+        case nen::Type::Enhancer:
+            DrawSphere(pos, radius * 1.15F, color);
+            DrawCircle3D(pos, radius * 1.9F, {1.0F, 0.0F, 0.0F}, 90.0F, Fade(color, 0.65F));
+            break;
+        case nen::Type::Transmuter: {
+            const Vector2 dir2D = Normalize2D(effect.velocity);
+            const Vector3 tail = ArenaToWorld(
+                {effect.position.x - dir2D.x * 24.0F, effect.position.y - dir2D.y * 24.0F},
+                pos.y - 0.08F);
+            DrawLine3D(tail, pos, color);
+            DrawSphere(pos, radius * 0.92F, color);
+            const Vector3 boltA{pos.x + std::sin(effect.phase * 5.0F) * 0.22F, pos.y + 0.25F,
+                                pos.z};
+            const Vector3 boltB{pos.x - std::sin(effect.phase * 5.0F) * 0.22F, pos.y - 0.18F,
+                                pos.z};
+            DrawLine3D(boltA, boltB, Fade(color, 0.95F));
+            break;
+        }
+        case nen::Type::Emitter: {
+            const Vector2 dir2D = Normalize2D(effect.velocity);
+            const Vector3 start = ArenaToWorld(
+                {effect.position.x - dir2D.x * 28.0F, effect.position.y - dir2D.y * 28.0F}, pos.y);
+            DrawCylinderEx(start, pos, radius * 0.55F, radius * 0.9F, 10, Fade(color, 0.9F));
+            DrawSphere(pos, radius * 0.82F, {255, 240, 220, 255});
+            break;
+        }
+        case nen::Type::Conjurer:
+            DrawCubeV(pos, {radius * 1.8F, radius * 1.8F, radius * 1.8F}, Fade(color, 0.9F));
+            DrawCubeWiresV(pos, {radius * 2.0F, radius * 2.0F, radius * 2.0F}, WHITE);
+            break;
+        case nen::Type::Manipulator: {
+            DrawSphere(pos, radius, color);
+            const float orbit = radius * 2.2F;
+            const Vector3 orb1{pos.x + std::cos(effect.phase * 6.0F) * orbit, pos.y + 0.08F,
+                               pos.z + std::sin(effect.phase * 6.0F) * orbit};
+            const Vector3 orb2{pos.x + std::cos(effect.phase * 6.0F + PI) * orbit, pos.y - 0.08F,
+                               pos.z + std::sin(effect.phase * 6.0F + PI) * orbit};
+            DrawSphere(orb1, radius * 0.35F, Fade(color, 0.9F));
+            DrawSphere(orb2, radius * 0.35F, Fade(color, 0.75F));
+            break;
+        }
+        case nen::Type::Specialist:
+            DrawSphere(pos, radius * 1.2F, color);
+            DrawLine3D({pos.x - radius * 1.6F, pos.y, pos.z}, {pos.x + radius * 1.6F, pos.y, pos.z},
+                       Fade(WHITE, 0.9F));
+            DrawLine3D({pos.x, pos.y - radius * 1.6F, pos.z}, {pos.x, pos.y + radius * 1.6F, pos.z},
+                       Fade(WHITE, 0.9F));
+            DrawLine3D({pos.x, pos.y, pos.z - radius * 1.6F}, {pos.x, pos.y, pos.z + radius * 1.6F},
+                       Fade(WHITE, 0.9F));
+            break;
+        }
     }
 }
 
@@ -1037,31 +1174,39 @@ void DrawWorld(const AppState &app) {
     DrawText(TextFormat("Potency: %d", app.player.hatsuPotency), panelX + 20, 308, 24, LIGHTGRAY);
     DrawText(TextFormat("Base Type: %s", nen::ToString(app.selectedBaseType).data()), panelX + 20,
              338, 24, LIGHTGRAY);
+    DrawText(TextFormat("Model: %s", app.hasPlayerModel ? "Loaded" : "Fallback"), panelX + 20, 368,
+             24, app.hasPlayerModel ? Color{150, 234, 170, 255} : Color{250, 190, 128, 255});
+    if (!app.hasPlayerModel) {
+        DrawText(app.playerModelStatus.c_str(), panelX + 20, 392, 18, Fade(WHITE, 0.72F));
+    }
 
-    DrawText(TextFormat("Base CD: %.2fs", app.baseAttackCooldown), panelX + 20, 376, 24, LIGHTGRAY);
-    DrawText(TextFormat("Hatsu CD: %.2fs", app.hatsuCooldown), panelX + 20, 406, 24, LIGHTGRAY);
+    const int statY = app.hasPlayerModel ? 402 : 422;
+    DrawText(TextFormat("Base CD: %.2fs", app.baseAttackCooldown), panelX + 20, statY, 24,
+             LIGHTGRAY);
+    DrawText(TextFormat("Hatsu CD: %.2fs", app.hatsuCooldown), panelX + 20, statY + 30, 24,
+             LIGHTGRAY);
     DrawText(TextFormat("Enemy HP: %d / %d", app.enemy.health, app.enemy.maxHealth), panelX + 20,
-             436, 24, LIGHTGRAY);
+             statY + 60, 24, LIGHTGRAY);
 
     if (app.enemy.manipulatedTimer > 0.0F) {
-        DrawText(TextFormat("Manipulated: %.2fs", app.enemy.manipulatedTimer), panelX + 20, 468, 24,
-                 {255, 210, 120, 255});
+        DrawText(TextFormat("Manipulated: %.2fs", app.enemy.manipulatedTimer), panelX + 20,
+                 statY + 92, 24, {255, 210, 120, 255});
     }
     if (app.enemy.vulnerabilityTimer > 0.0F) {
-        DrawText(TextFormat("Vulnerable: %.2fs", app.enemy.vulnerabilityTimer), panelX + 20, 498,
-                 24, {255, 121, 210, 255});
+        DrawText(TextFormat("Vulnerable: %.2fs", app.enemy.vulnerabilityTimer), panelX + 20,
+                 statY + 122, 24, {255, 121, 210, 255});
     }
 
-    DrawText("Hatsu Description", panelX + 20, 552, 28, RAYWHITE);
-    DrawText(nen::HatsuAbilityDescription(app.player.naturalType).data(), panelX + 20, 590, 20,
+    DrawText("Hatsu Description", panelX + 20, 590, 28, RAYWHITE);
+    DrawText(nen::HatsuAbilityDescription(app.player.naturalType).data(), panelX + 20, 626, 20,
              LIGHTGRAY);
 
-    DrawText("Controls", panelX + 20, 662, 28, RAYWHITE);
-    DrawText("Move: WASD / Arrows", panelX + 20, 700, 22, LIGHTGRAY);
-    DrawText("Base Attack: LMB or SPACE", panelX + 20, 728, 22, LIGHTGRAY);
-    DrawText("Select Base Type: 1..6", panelX + 20, 756, 22, LIGHTGRAY);
-    DrawText("Hatsu: RMB or Q | Recharge: Hold R", panelX + 20, 784, 22, LIGHTGRAY);
-    DrawText("TAB 2D/3D | Save: F5 | Back: ESC", panelX + 20, 812, 22, LIGHTGRAY);
+    DrawText("Controls", panelX + 20, 668, 28, RAYWHITE);
+    DrawText("Move: WASD / Arrows", panelX + 20, 706, 22, LIGHTGRAY);
+    DrawText("Base Attack: LMB or SPACE", panelX + 20, 734, 22, LIGHTGRAY);
+    DrawText("Select Base Type: 1..6", panelX + 20, 762, 22, LIGHTGRAY);
+    DrawText("Hatsu: RMB or Q | Recharge: Hold R", panelX + 20, 790, 22, LIGHTGRAY);
+    DrawText("TAB 2D/3D | Save: F5 | Back: ESC", panelX + 20, 818, 22, LIGHTGRAY);
 }
 
 } // namespace
