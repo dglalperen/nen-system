@@ -40,8 +40,10 @@ Controls:
 - Keyboard + mouse navigation for menu and quiz options
 - `WASD` or arrow keys: move in world
 - `SPACE` or left mouse button: cast base Nen attack
+- `1-6`: change base attack Nen type (independent from your natural type)
 - `Q` or right mouse button: cast your character's unique hatsu
-- Hold `R`: recharge aura with channeling animation
+- Hold `R`: recharge aura with white channeling animation
+- `TAB`: toggle 2D/3D combat view
 - `F5`: manual save
 - `ESC`: back to menu (or quit from main menu)
 
@@ -95,9 +97,11 @@ This is currently a Tier 1 prototype:
 - character create/load persistence
 - personality-based Nen type assignment + water divination reveal
 - unique hatsu identity per character (name + potency)
+- hatsu ability name/description visible to player
 - animated type-specific base attacks + hatsu attacks
 - manipulation/vulnerability combat effects (Manipulator-type control fantasy)
 - aura economy loop (spend aura in combat, recover by channeling)
+- first 3D arena migration path with primitive character models
 
 Next milestone is Tier 2:
 

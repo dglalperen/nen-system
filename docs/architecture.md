@@ -14,6 +14,7 @@ Build a maintainable Nen sandbox game with clear boundaries between domain logic
   - Runtime gameplay loop and presentation bridge.
   - Uses `raylib` for input, windowing, drawing, and frame loop.
   - Handles screen state flow (menu -> quiz -> reveal -> world) and persistence.
+  - Contains both 2D and early 3D world rendering paths for migration.
   - Calls into `nen_core` for authoritative rules.
 - `nen_world`:
   - Small executable entry point.

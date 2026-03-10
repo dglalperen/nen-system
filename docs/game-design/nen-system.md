@@ -19,11 +19,13 @@ Prototype a simplified Nen training sandbox that supports experimentation and fu
   - two steps away: 60%
   - opposite: 40%
 - Aura is recovered by channeling (hold recharge action).
+- Base attacks can be cast as any Nen type (player-selected).
 - Combat uses a type modifier:
   - same type attacks are strongest
   - farther types are progressively weaker
 - Each type has a specific base attack behavior and visual identity.
 - Each character has a deterministic unique hatsu name and potency.
+- Hatsu has an explicit ability name and description in UI.
 - Manipulator attacks can apply control effects (manipulated and vulnerable states).
 
 ## Why This Simplification

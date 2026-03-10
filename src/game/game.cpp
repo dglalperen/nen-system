@@ -29,6 +29,7 @@ constexpr int kBaseAttackAuraCost = 16;
 constexpr int kHatsuAuraCost = 52;
 constexpr int kBaseAttackPower = 25;
 constexpr int kHatsuAttackPower = 44;
+constexpr float kWorldScale = 0.035F;
 
 const Rectangle kArenaBounds{40.0F, 110.0F, 1020.0F, 730.0F};
 
@@ -75,11 +76,20 @@ struct AppState {
     Vector2 playerSize{36.0F, 52.0F};
     bool chargingAura = false;
     float chargeEffectTimer = 0.0F;
+    nen::Type selectedBaseType = nen::Type::Enhancer;
 
     float baseAttackCooldown = 0.0F;
     float hatsuCooldown = 0.0F;
     std::vector<AttackEffect> activeAttacks;
     EnemyState enemy;
+    bool use3DView = true;
+    Camera3D camera{
+        .position = {0.0F, 34.0F, 30.0F},
+        .target = {0.0F, 0.0F, 0.0F},
+        .up = {0.0F, 1.0F, 0.0F},
+        .fovy = 45.0F,
+        .projection = CAMERA_PERSPECTIVE,
+    };
 
     std::string statusMessage = "Select New Character or Load Character.";
 };
@@ -100,6 +110,45 @@ Color TypeColor(nen::Type type) {
         return {255, 90, 169, 255};
     }
     return RAYWHITE;
+}
+
+Vector3 ArenaToWorld(Vector2 arenaPosition, float y = 0.0F) {
+    const float cx = kArenaBounds.x + kArenaBounds.width * 0.5F;
+    const float cy = kArenaBounds.y + kArenaBounds.height * 0.5F;
+    return {(arenaPosition.x - cx) * kWorldScale, y, (arenaPosition.y - cy) * kWorldScale};
+}
+
+Vector2 WorldToArena(Vector3 worldPosition) {
+    const float cx = kArenaBounds.x + kArenaBounds.width * 0.5F;
+    const float cy = kArenaBounds.y + kArenaBounds.height * 0.5F;
+    return {worldPosition.x / kWorldScale + cx, worldPosition.z / kWorldScale + cy};
+}
+
+bool MouseToArenaPoint(const Camera3D &camera, Vector2 *outArenaPoint) {
+    if (outArenaPoint == nullptr) {
+        return false;
+    }
+
+    const Ray ray = GetMouseRay(GetMousePosition(), camera);
+    if (std::abs(ray.direction.y) < 0.0001F) {
+        return false;
+    }
+    const float t = -ray.position.y / ray.direction.y;
+    if (t < 0.0F) {
+        return false;
+    }
+
+    const Vector3 hit{
+        ray.position.x + ray.direction.x * t,
+        0.0F,
+        ray.position.z + ray.direction.z * t,
+    };
+    *outArenaPoint = WorldToArena(hit);
+    outArenaPoint->x =
+        std::clamp(outArenaPoint->x, kArenaBounds.x, kArenaBounds.x + kArenaBounds.width);
+    outArenaPoint->y =
+        std::clamp(outArenaPoint->y, kArenaBounds.y, kArenaBounds.y + kArenaBounds.height);
+    return true;
 }
 
 bool IsInside(const Rectangle &rect, Vector2 point) { return CheckCollisionPointRec(point, rect); }
@@ -160,18 +209,26 @@ void StartWorld(AppState *app, const nen::Character &character) {
     app->playerPosition = {kArenaBounds.x + 110.0F, kArenaBounds.y + kArenaBounds.height - 130.0F};
     app->chargingAura = false;
     app->chargeEffectTimer = 0.0F;
+    app->selectedBaseType = character.naturalType;
     app->baseAttackCooldown = 0.0F;
     app->hatsuCooldown = 0.0F;
     app->activeAttacks.clear();
     app->enemy = EnemyState{};
-    app->statusMessage = "LMB/SPACE base attack, RMB/Q hatsu, hold R to recover aura.";
+    app->use3DView = true;
+    app->camera.position = {0.0F, 34.0F, 30.0F};
+    app->camera.target = {0.0F, 0.0F, 0.0F};
+    app->camera.up = {0.0F, 1.0F, 0.0F};
+    app->camera.fovy = 45.0F;
+    app->camera.projection = CAMERA_PERSPECTIVE;
+    app->statusMessage =
+        "LMB/SPACE base attack, RMB/Q hatsu, hold R to recover aura. TAB toggles 2D/3D.";
 }
 
 void EnsureCharacterHasHatsu(nen::Character *character) {
     if (character == nullptr) {
         return;
     }
-    if (character->hatsuName.empty()) {
+    if (character->hatsuName.empty() || character->hatsuName == "Unnamed Hatsu") {
         character->hatsuName = nen::GenerateHatsuName(character->name, character->naturalType);
     }
     if (character->hatsuPotency < 80 || character->hatsuPotency > 150) {
@@ -459,6 +516,22 @@ void RechargeAura(AppState *app, float dt) {
     app->statusMessage = "Channeling aura... hold R to recover.";
 }
 
+void UpdateBaseTypeSelection(AppState *app) {
+    if (IsKeyPressed(KEY_ONE)) {
+        app->selectedBaseType = nen::Type::Enhancer;
+    } else if (IsKeyPressed(KEY_TWO)) {
+        app->selectedBaseType = nen::Type::Transmuter;
+    } else if (IsKeyPressed(KEY_THREE)) {
+        app->selectedBaseType = nen::Type::Emitter;
+    } else if (IsKeyPressed(KEY_FOUR)) {
+        app->selectedBaseType = nen::Type::Conjurer;
+    } else if (IsKeyPressed(KEY_FIVE)) {
+        app->selectedBaseType = nen::Type::Manipulator;
+    } else if (IsKeyPressed(KEY_SIX)) {
+        app->selectedBaseType = nen::Type::Specialist;
+    }
+}
+
 void CastBaseAttack(AppState *app, Vector2 target) {
     if (app->baseAttackCooldown > 0.0F) {
         app->statusMessage = "Base attack recharging.";
@@ -471,11 +544,12 @@ void CastBaseAttack(AppState *app, Vector2 target) {
 
     const Vector2 origin{app->playerPosition.x + app->playerSize.x * 0.5F,
                          app->playerPosition.y + app->playerSize.y * 0.38F};
-    const int damage = nen::ComputeAttackDamage(app->player.naturalType, app->player.naturalType,
-                                                kBaseAttackPower);
-    SpawnBaseAttack(&app->activeAttacks, app->player.naturalType, origin, target, damage);
+    const int damage =
+        nen::ComputeAttackDamage(app->player.naturalType, app->selectedBaseType, kBaseAttackPower);
+    SpawnBaseAttack(&app->activeAttacks, app->selectedBaseType, origin, target, damage);
     app->baseAttackCooldown = 0.24F;
-    app->statusMessage = "Base aura attack cast.";
+    app->statusMessage =
+        "Base aura attack cast: " + std::string(nen::ToString(app->selectedBaseType)) + ".";
 }
 
 void CastHatsu(AppState *app, Vector2 target) {
@@ -557,13 +631,27 @@ void UpdateWorld(AppState *app) {
 
     app->baseAttackCooldown = std::max(0.0F, app->baseAttackCooldown - dt);
     app->hatsuCooldown = std::max(0.0F, app->hatsuCooldown - dt);
+    if (IsKeyPressed(KEY_TAB)) {
+        app->use3DView = !app->use3DView;
+        app->statusMessage = app->use3DView ? "3D view enabled." : "2D view enabled.";
+    }
+
+    UpdateBaseTypeSelection(app);
 
     RechargeAura(app, dt);
     UpdatePlayerMovement(app, dt);
     MoveEnemy(app, dt);
 
-    const Vector2 cursor = GetMousePosition();
-    const Vector2 target = IsInside(kArenaBounds, cursor) ? cursor : EnemyCenter(*app);
+    Vector2 target = EnemyCenter(*app);
+    if (app->use3DView) {
+        Vector2 arenaPoint;
+        if (MouseToArenaPoint(app->camera, &arenaPoint)) {
+            target = arenaPoint;
+        }
+    } else {
+        const Vector2 cursor = GetMousePosition();
+        target = IsInside(kArenaBounds, cursor) ? cursor : EnemyCenter(*app);
+    }
 
     const bool baseCast = IsKeyPressed(KEY_SPACE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
     const bool hatsuCast = IsKeyPressed(KEY_Q) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
@@ -674,6 +762,10 @@ void DrawReveal(const AppState &app) {
              86, 160, 48, WHITE);
     DrawText(nen::WaterDivinationEffect(app.player.naturalType).data(), 86, 232, 30, LIGHTGRAY);
     DrawText(TextFormat("Unique Hatsu: %s", app.player.hatsuName.c_str()), 86, 286, 30, RAYWHITE);
+    DrawText(
+        TextFormat("Special Ability: %s", nen::HatsuAbilityName(app.player.naturalType).data()), 86,
+        330, 28, LIGHTGRAY);
+    DrawText(nen::HatsuAbilityDescription(app.player.naturalType).data(), 86, 366, 24, LIGHTGRAY);
 
     const Rectangle glass{980.0F, 166.0F, 280.0F, 430.0F};
     DrawRectangleRounded(glass, 0.06F, 8, Fade({51, 80, 132, 255}, 0.44F));
@@ -733,10 +825,9 @@ void DrawPlayer(const AppState &app) {
 
     if (app.chargingAura) {
         const float t = app.chargeEffectTimer;
-        DrawCircleLines(base.x + 18.0F, base.y + 24.0F, 30.0F + std::sin(t * 5.5F) * 5.0F,
-                        auraColor);
+        DrawCircleLines(base.x + 18.0F, base.y + 24.0F, 30.0F + std::sin(t * 5.5F) * 5.0F, WHITE);
         DrawCircleLines(base.x + 18.0F, base.y + 24.0F, 42.0F + std::sin(t * 4.2F) * 5.0F,
-                        Fade(auraColor, 0.7F));
+                        Fade(WHITE, 0.8F));
     }
 
     DrawCircle(base.x + 18.0F, base.y + 10.0F, 9.0F, {236, 226, 205, 255});
@@ -772,26 +863,109 @@ void DrawEnemy(const AppState &app) {
     }
 }
 
+void DrawArena3D(const AppState &app) {
+    const Vector3 center = ArenaToWorld(
+        {kArenaBounds.x + kArenaBounds.width * 0.5F, kArenaBounds.y + kArenaBounds.height * 0.5F});
+    const float width = kArenaBounds.width * kWorldScale;
+    const float depth = kArenaBounds.height * kWorldScale;
+    DrawPlane(center, {width, depth}, {20, 33, 56, 255});
+
+    DrawCubeWires({center.x, 1.5F, center.z}, width, 3.0F, depth, Fade(WHITE, 0.45F));
+    DrawGrid(32, 1.0F);
+
+    DrawSphereWires({center.x, 0.15F, center.z}, 0.22F, 8, 8, Fade(WHITE, 0.25F));
+    if (app.chargingAura) {
+        const float pulse = 0.18F + std::sin(app.chargeEffectTimer * 5.0F) * 0.05F;
+        DrawSphereWires({center.x, 0.15F, center.z}, pulse, 8, 8, Fade(WHITE, 0.4F));
+    }
+}
+
+void DrawAttackEffects3D(const AppState &app) {
+    for (const auto &effect : app.activeAttacks) {
+        const Vector3 pos = ArenaToWorld(effect.position, 0.55F + effect.radius * 0.004F);
+        const float radius = std::max(0.08F, effect.radius * kWorldScale * 0.65F);
+        Color color = TypeColor(effect.type);
+        color.a = 220;
+        DrawSphere(pos, radius, color);
+        DrawSphereWires(pos, radius * 1.15F, 8, 8, Fade(WHITE, 0.35F));
+    }
+}
+
+void DrawEnemy3D(const AppState &app) {
+    const EnemyState &enemy = app.enemy;
+    const Vector3 center = ArenaToWorld(enemy.position, 0.95F);
+    const float radius = enemy.radius * kWorldScale;
+    const Color coreColor =
+        enemy.hitFlashTimer > 0.0F ? Color{255, 236, 178, 255} : Color{216, 105, 102, 255};
+
+    DrawSphere(center, radius, {70, 37, 37, 255});
+    DrawSphere({center.x, center.y + radius * 0.25F, center.z}, radius * 0.72F, coreColor);
+    DrawSphereWires(center, radius + 0.03F, 10, 10, Fade(WHITE, 0.75F));
+
+    if (enemy.manipulatedTimer > 0.0F) {
+        DrawCircle3D({center.x, center.y + 0.02F, center.z}, radius + 0.18F, {1.0F, 0.0F, 0.0F},
+                     90.0F, {255, 207, 108, 255});
+    }
+    if (enemy.vulnerabilityTimer > 0.0F) {
+        DrawCircle3D({center.x, center.y + 0.05F, center.z}, radius + 0.24F, {1.0F, 0.0F, 0.0F},
+                     90.0F, {255, 120, 205, 255});
+    }
+}
+
+void DrawPlayer3D(const AppState &app) {
+    const Vector2 p2 = {app.playerPosition.x + app.playerSize.x * 0.5F,
+                        app.playerPosition.y + app.playerSize.y * 0.5F};
+    const Vector3 pos = ArenaToWorld(p2, 0.75F);
+    const Color aura = TypeColor(app.player.naturalType);
+
+    // Placeholder 3D character model built from primitives until imported models are added.
+    DrawCube({pos.x, pos.y + 0.22F, pos.z}, 0.38F, 0.46F, 0.24F, {48, 74, 123, 255});
+    DrawCube({pos.x - 0.24F, pos.y + 0.2F, pos.z}, 0.1F, 0.34F, 0.1F, {230, 220, 201, 255});
+    DrawCube({pos.x + 0.24F, pos.y + 0.2F, pos.z}, 0.1F, 0.34F, 0.1F, {230, 220, 201, 255});
+    DrawCube({pos.x - 0.1F, pos.y - 0.18F, pos.z}, 0.1F, 0.34F, 0.1F, {220, 211, 196, 255});
+    DrawCube({pos.x + 0.1F, pos.y - 0.18F, pos.z}, 0.1F, 0.34F, 0.1F, {220, 211, 196, 255});
+    DrawSphere({pos.x, pos.y + 0.57F, pos.z}, 0.13F, {236, 226, 205, 255});
+
+    DrawCircle3D({pos.x, pos.y + 0.22F, pos.z}, 0.4F, {1.0F, 0.0F, 0.0F}, 90.0F, Fade(aura, 0.8F));
+    if (app.chargingAura) {
+        const float pulse = 0.52F + std::sin(app.chargeEffectTimer * 4.8F) * 0.06F;
+        DrawCircle3D({pos.x, pos.y + 0.22F, pos.z}, pulse, {1.0F, 0.0F, 0.0F}, 90.0F, WHITE);
+    }
+}
+
 void DrawWorld(const AppState &app) {
     DrawRectangleGradientV(0, 0, kWidth, kHeight, {15, 24, 41, 255}, {8, 14, 27, 255});
 
-    DrawRectangleRounded(kArenaBounds, 0.02F, 6, {18, 30, 50, 255});
-    DrawRectangleRoundedLinesEx(kArenaBounds, 0.02F, 6, 3.0F, Fade(WHITE, 0.65F));
+    if (app.use3DView) {
+        BeginMode3D(app.camera);
+        DrawArena3D(app);
+        DrawAttackEffects3D(app);
+        DrawEnemy3D(app);
+        DrawPlayer3D(app);
+        EndMode3D();
+        DrawText("3D Mode (TAB to toggle 2D)", static_cast<int>(kArenaBounds.x),
+                 static_cast<int>(kArenaBounds.y - 34.0F), 24, Fade(WHITE, 0.9F));
+    } else {
+        DrawRectangleRounded(kArenaBounds, 0.02F, 6, {18, 30, 50, 255});
+        DrawRectangleRoundedLinesEx(kArenaBounds, 0.02F, 6, 3.0F, Fade(WHITE, 0.65F));
 
-    for (int x = 0; x < 20; ++x) {
-        const float px = kArenaBounds.x + 14.0F + static_cast<float>(x) * 50.0F;
-        DrawLine(px, kArenaBounds.y + 10.0F, px, kArenaBounds.y + kArenaBounds.height - 10.0F,
-                 Fade(WHITE, 0.06F));
-    }
-    for (int y = 0; y < 14; ++y) {
-        const float py = kArenaBounds.y + 14.0F + static_cast<float>(y) * 50.0F;
-        DrawLine(kArenaBounds.x + 10.0F, py, kArenaBounds.x + kArenaBounds.width - 10.0F, py,
-                 Fade(WHITE, 0.06F));
-    }
+        for (int x = 0; x < 20; ++x) {
+            const float px = kArenaBounds.x + 14.0F + static_cast<float>(x) * 50.0F;
+            DrawLine(px, kArenaBounds.y + 10.0F, px, kArenaBounds.y + kArenaBounds.height - 10.0F,
+                     Fade(WHITE, 0.06F));
+        }
+        for (int y = 0; y < 14; ++y) {
+            const float py = kArenaBounds.y + 14.0F + static_cast<float>(y) * 50.0F;
+            DrawLine(kArenaBounds.x + 10.0F, py, kArenaBounds.x + kArenaBounds.width - 10.0F, py,
+                     Fade(WHITE, 0.06F));
+        }
 
-    DrawAttackEffects(app.activeAttacks);
-    DrawEnemy(app);
-    DrawPlayer(app);
+        DrawAttackEffects(app.activeAttacks);
+        DrawEnemy(app);
+        DrawPlayer(app);
+        DrawText("2D Mode (TAB for 3D)", static_cast<int>(kArenaBounds.x),
+                 static_cast<int>(kArenaBounds.y - 34.0F), 24, Fade(WHITE, 0.9F));
+    }
 
     const int panelX = 1100;
     DrawRectangleRounded({static_cast<float>(panelX), 110.0F, 420.0F, 730.0F}, 0.03F, 6,
@@ -806,29 +980,36 @@ void DrawWorld(const AppState &app) {
              RAYWHITE);
     DrawText(TextFormat("Hatsu: %s", app.player.hatsuName.c_str()), panelX + 20, 248, 24,
              LIGHTGRAY);
-    DrawText(TextFormat("Hatsu Potency: %d", app.player.hatsuPotency), panelX + 20, 278, 24,
-             LIGHTGRAY);
+    DrawText(TextFormat("Hatsu Skill: %s", nen::HatsuAbilityName(app.player.naturalType).data()),
+             panelX + 20, 278, 24, LIGHTGRAY);
+    DrawText(TextFormat("Potency: %d", app.player.hatsuPotency), panelX + 20, 308, 24, LIGHTGRAY);
+    DrawText(TextFormat("Base Type: %s", nen::ToString(app.selectedBaseType).data()), panelX + 20,
+             338, 24, LIGHTGRAY);
 
-    DrawText(TextFormat("Base CD: %.2fs", app.baseAttackCooldown), panelX + 20, 328, 24, LIGHTGRAY);
-    DrawText(TextFormat("Hatsu CD: %.2fs", app.hatsuCooldown), panelX + 20, 358, 24, LIGHTGRAY);
+    DrawText(TextFormat("Base CD: %.2fs", app.baseAttackCooldown), panelX + 20, 376, 24, LIGHTGRAY);
+    DrawText(TextFormat("Hatsu CD: %.2fs", app.hatsuCooldown), panelX + 20, 406, 24, LIGHTGRAY);
     DrawText(TextFormat("Enemy HP: %d / %d", app.enemy.health, app.enemy.maxHealth), panelX + 20,
-             388, 24, LIGHTGRAY);
+             436, 24, LIGHTGRAY);
 
     if (app.enemy.manipulatedTimer > 0.0F) {
-        DrawText(TextFormat("Manipulated: %.2fs", app.enemy.manipulatedTimer), panelX + 20, 420, 24,
+        DrawText(TextFormat("Manipulated: %.2fs", app.enemy.manipulatedTimer), panelX + 20, 468, 24,
                  {255, 210, 120, 255});
     }
     if (app.enemy.vulnerabilityTimer > 0.0F) {
-        DrawText(TextFormat("Vulnerable: %.2fs", app.enemy.vulnerabilityTimer), panelX + 20, 450,
+        DrawText(TextFormat("Vulnerable: %.2fs", app.enemy.vulnerabilityTimer), panelX + 20, 498,
                  24, {255, 121, 210, 255});
     }
 
-    DrawText("Controls", panelX + 20, 518, 28, RAYWHITE);
-    DrawText("Move: WASD / Arrows", panelX + 20, 556, 22, LIGHTGRAY);
-    DrawText("Base Attack: LMB or SPACE", panelX + 20, 586, 22, LIGHTGRAY);
-    DrawText("Hatsu: RMB or Q", panelX + 20, 616, 22, LIGHTGRAY);
-    DrawText("Recharge Aura: Hold R", panelX + 20, 646, 22, LIGHTGRAY);
-    DrawText("Save: F5 | Back: ESC", panelX + 20, 676, 22, LIGHTGRAY);
+    DrawText("Hatsu Description", panelX + 20, 552, 28, RAYWHITE);
+    DrawText(nen::HatsuAbilityDescription(app.player.naturalType).data(), panelX + 20, 590, 20,
+             LIGHTGRAY);
+
+    DrawText("Controls", panelX + 20, 662, 28, RAYWHITE);
+    DrawText("Move: WASD / Arrows", panelX + 20, 700, 22, LIGHTGRAY);
+    DrawText("Base Attack: LMB or SPACE", panelX + 20, 728, 22, LIGHTGRAY);
+    DrawText("Select Base Type: 1..6", panelX + 20, 756, 22, LIGHTGRAY);
+    DrawText("Hatsu: RMB or Q | Recharge: Hold R", panelX + 20, 784, 22, LIGHTGRAY);
+    DrawText("TAB 2D/3D | Save: F5 | Back: ESC", panelX + 20, 812, 22, LIGHTGRAY);
 }
 
 } // namespace

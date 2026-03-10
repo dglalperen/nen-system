@@ -57,6 +57,10 @@ int main() {
     Expect(hatsuNameA == hatsuNameB, "hatsu naming should be deterministic for same input");
     const int potency = nen::GenerateHatsuPotency("alperen");
     Expect(potency >= 90 && potency <= 130, "hatsu potency should remain in expected range");
+    Expect(!nen::HatsuAbilityName(nen::Type::Manipulator).empty(),
+           "hatsu ability name should be available");
+    Expect(!nen::HatsuAbilityDescription(nen::Type::Manipulator).empty(),
+           "hatsu ability description should be available");
 
     std::cout << "All tests passed.\n";
     return 0;
