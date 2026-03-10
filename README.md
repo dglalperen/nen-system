@@ -49,6 +49,11 @@ Controls:
 
 Saved characters are stored in `~/.nen_world/characters`.
 
+3D player model:
+
+- Put your model at `assets/models/killua.glb`
+- If missing or invalid, the game falls back to primitive placeholder geometry
+
 ## Tests
 
 ```bash

@@ -82,6 +82,11 @@ struct AppState {
     float hatsuCooldown = 0.0F;
     std::vector<AttackEffect> activeAttacks;
     EnemyState enemy;
+    Model playerModel{};
+    bool hasPlayerModel = false;
+    float playerModelScale = 1.0F;
+    float playerModelYOffset = 0.0F;
+    float playerModelYawOffset = 180.0F;
     bool use3DView = true;
     Camera3D camera{
         .position = {0.0F, 34.0F, 30.0F},
@@ -200,6 +205,45 @@ void SaveCurrentCharacter(AppState *app) {
     if (!SaveCharacter(app->player, app->saveDir, &error)) {
         app->statusMessage = error;
     }
+}
+
+void TryLoadPlayerModel(AppState *app) {
+    if (app == nullptr) {
+        return;
+    }
+
+    const std::string modelPath = "assets/models/killua.glb";
+    if (!FileExists(modelPath.c_str())) {
+        app->statusMessage = "3D model not found at assets/models/killua.glb. Using fallback.";
+        return;
+    }
+
+    Model model = LoadModel(modelPath.c_str());
+    if (!IsModelValid(model)) {
+        app->statusMessage = "Could not load killua.glb. Using fallback primitive model.";
+        return;
+    }
+
+    app->playerModel = model;
+    app->hasPlayerModel = true;
+
+    const BoundingBox bounds = GetModelBoundingBox(model);
+    const float height = bounds.max.y - bounds.min.y;
+    if (height > 0.001F) {
+        app->playerModelScale = 1.75F / height;
+        app->playerModelYOffset = -bounds.min.y * app->playerModelScale;
+    } else {
+        app->playerModelScale = 1.0F;
+        app->playerModelYOffset = 0.0F;
+    }
+}
+
+void UnloadPlayerModel(AppState *app) {
+    if (app == nullptr || !app->hasPlayerModel) {
+        return;
+    }
+    UnloadModel(app->playerModel);
+    app->hasPlayerModel = false;
 }
 
 void StartWorld(AppState *app, const nen::Character &character) {
@@ -918,13 +962,21 @@ void DrawPlayer3D(const AppState &app) {
     const Vector3 pos = ArenaToWorld(p2, 0.75F);
     const Color aura = TypeColor(app.player.naturalType);
 
-    // Placeholder 3D character model built from primitives until imported models are added.
-    DrawCube({pos.x, pos.y + 0.22F, pos.z}, 0.38F, 0.46F, 0.24F, {48, 74, 123, 255});
-    DrawCube({pos.x - 0.24F, pos.y + 0.2F, pos.z}, 0.1F, 0.34F, 0.1F, {230, 220, 201, 255});
-    DrawCube({pos.x + 0.24F, pos.y + 0.2F, pos.z}, 0.1F, 0.34F, 0.1F, {230, 220, 201, 255});
-    DrawCube({pos.x - 0.1F, pos.y - 0.18F, pos.z}, 0.1F, 0.34F, 0.1F, {220, 211, 196, 255});
-    DrawCube({pos.x + 0.1F, pos.y - 0.18F, pos.z}, 0.1F, 0.34F, 0.1F, {220, 211, 196, 255});
-    DrawSphere({pos.x, pos.y + 0.57F, pos.z}, 0.13F, {236, 226, 205, 255});
+    if (app.hasPlayerModel) {
+        const Vector2 toEnemy{app.enemy.position.x - p2.x, app.enemy.position.y - p2.y};
+        const float yawDegrees =
+            std::atan2(toEnemy.x, toEnemy.y) * RAD2DEG + app.playerModelYawOffset;
+        const Vector3 drawPos = ArenaToWorld(p2, app.playerModelYOffset);
+        DrawModelEx(app.playerModel, drawPos, {0.0F, 1.0F, 0.0F}, yawDegrees,
+                    {app.playerModelScale, app.playerModelScale, app.playerModelScale}, WHITE);
+    } else {
+        DrawCube({pos.x, pos.y + 0.22F, pos.z}, 0.38F, 0.46F, 0.24F, {48, 74, 123, 255});
+        DrawCube({pos.x - 0.24F, pos.y + 0.2F, pos.z}, 0.1F, 0.34F, 0.1F, {230, 220, 201, 255});
+        DrawCube({pos.x + 0.24F, pos.y + 0.2F, pos.z}, 0.1F, 0.34F, 0.1F, {230, 220, 201, 255});
+        DrawCube({pos.x - 0.1F, pos.y - 0.18F, pos.z}, 0.1F, 0.34F, 0.1F, {220, 211, 196, 255});
+        DrawCube({pos.x + 0.1F, pos.y - 0.18F, pos.z}, 0.1F, 0.34F, 0.1F, {220, 211, 196, 255});
+        DrawSphere({pos.x, pos.y + 0.57F, pos.z}, 0.13F, {236, 226, 205, 255});
+    }
 
     DrawCircle3D({pos.x, pos.y + 0.22F, pos.z}, 0.4F, {1.0F, 0.0F, 0.0F}, 90.0F, Fade(aura, 0.8F));
     if (app.chargingAura) {
@@ -1020,6 +1072,7 @@ int Run() {
     SetExitKey(KEY_NULL);
 
     AppState app;
+    TryLoadPlayerModel(&app);
     RefreshStoredCharacters(&app);
 
     bool running = true;
@@ -1079,6 +1132,7 @@ int Run() {
     }
 
     SaveCurrentCharacter(&app);
+    UnloadPlayerModel(&app);
     CloseWindow();
     return 0;
 }
