@@ -1316,13 +1316,17 @@ void UpdateWorld(AppState *app) {
         app->use3DView = !app->use3DView;
         app->statusMessage = app->use3DView ? "3D view enabled." : "2D view enabled.";
     }
-    if (app->hasPlayerModel && IsKeyPressed(KEY_EQUAL)) {
-        app->playerModelScale = std::min(15.0F, app->playerModelScale * 1.12F);
-        app->statusMessage = "Model scale increased.";
+    const bool scaleUpPressed =
+        IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD) || IsKeyPressed(KEY_RIGHT_BRACKET);
+    const bool scaleDownPressed =
+        IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT) || IsKeyPressed(KEY_LEFT_BRACKET);
+    if (app->hasPlayerModel && scaleUpPressed) {
+        app->playerModelScale = std::min(15.0F, app->playerModelScale * 1.35F);
+        app->statusMessage = TextFormat("Model scale increased to %.3f.", app->playerModelScale);
     }
-    if (app->hasPlayerModel && IsKeyPressed(KEY_MINUS)) {
-        app->playerModelScale = std::max(0.02F, app->playerModelScale * 0.9F);
-        app->statusMessage = "Model scale decreased.";
+    if (app->hasPlayerModel && scaleDownPressed) {
+        app->playerModelScale = std::max(0.005F, app->playerModelScale * 0.75F);
+        app->statusMessage = TextFormat("Model scale decreased to %.3f.", app->playerModelScale);
     }
 
     UpdateBaseTypeSelection(app);
@@ -1928,7 +1932,8 @@ void DrawWorld(const AppState &app) {
                         LIGHTGRAY, 2);
     y = DrawWrappedText("Camera: Hold MMB + drag orbit, mouse wheel zoom",
                         {textX, y, textW, 52.0F}, 22, 1.0F, LIGHTGRAY, 2);
-    y = DrawWrappedText("TAB 2D/3D | +/- model scale", {textX, y, textW, 28.0F}, 22, 1.0F, LIGHTGRAY);
+    y = DrawWrappedText("TAB 2D/3D | +/- or [ ] model scale", {textX, y, textW, 48.0F}, 22, 1.0F,
+                        LIGHTGRAY, 2);
     DrawWrappedText("Save: F5 | Back: ESC", {textX, y, textW, 28.0F}, 22, 1.0F, LIGHTGRAY);
 }
 
