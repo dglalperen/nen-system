@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <string>
@@ -44,6 +45,24 @@ enum class Screen {
     Quiz,
     Reveal,
     World,
+};
+
+enum class AnimState {
+    Idle,
+    Move,
+    Charge,
+    CastBase,
+    CastHatsu,
+};
+
+struct QueuedAction {
+    bool queued = false;
+    bool hatsu = false;
+    bool fired = false;
+    Vector2 target{0.0F, 0.0F};
+    float timer = 0.0F;
+    float triggerSeconds = 0.14F;
+    float finishSeconds = 0.32F;
 };
 
 struct EnemyState {
@@ -102,6 +121,22 @@ struct AppState {
     float cameraOrbitAngle = 0.88F;
     float cameraDistance = 15.0F;
     float cameraHeight = 9.0F;
+    float playerMoveSpeed = 0.0F;
+    float proceduralAnimTime = 0.0F;
+    float modelBobOffset = 0.0F;
+    float modelLeanDegrees = 0.0F;
+    float modelCastLeanDegrees = 0.0F;
+    ModelAnimation *playerAnimations = nullptr;
+    int playerAnimationCount = 0;
+    int idleAnimationIndex = -1;
+    int moveAnimationIndex = -1;
+    int chargeAnimationIndex = -1;
+    int baseCastAnimationIndex = -1;
+    int hatsuCastAnimationIndex = -1;
+    int activeAnimationIndex = -1;
+    float activeAnimationFrame = 0.0F;
+    AnimState animationState = AnimState::Idle;
+    QueuedAction queuedAction{};
     Camera3D camera{
         .position = {0.0F, 13.0F, 16.0F},
         .target = {0.0F, 0.0F, 0.0F},
@@ -363,21 +398,161 @@ BoundingBox MergeBounds(const BoundingBox &a, const BoundingBox &b) {
 }
 
 bool IsUsableMeshBounds(const BoundingBox &bounds, int vertexCount) {
-    if (vertexCount < 24) {
+    if (vertexCount < 3) {
         return false;
     }
     const float w = bounds.max.x - bounds.min.x;
     const float h = bounds.max.y - bounds.min.y;
     const float d = bounds.max.z - bounds.min.z;
-    if (w <= 0.001F || h <= 0.001F || d <= 0.001F) {
+    if (w <= 0.00001F || h <= 0.00001F || d <= 0.00001F) {
+        return false;
+    }
+    if (!std::isfinite(w) || !std::isfinite(h) || !std::isfinite(d)) {
         return false;
     }
     const float longest = std::max({w, h, d});
-    const float shortest = std::max(0.0001F, std::min({w, h, d}));
-    if (longest / shortest > 65.0F && vertexCount < 120) {
-        return false;
+    return longest < 1'000'000.0F;
+}
+
+std::string ToLowerAscii(std::string_view value) {
+    std::string result;
+    result.reserve(value.size());
+    for (char c : value) {
+        result.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     }
-    return longest < 25000.0F;
+    return result;
+}
+
+bool ContainsAnyTerm(std::string_view text, std::initializer_list<std::string_view> terms) {
+    for (std::string_view term : terms) {
+        if (text.find(term) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int FindAnimationIndex(const AppState &app, std::initializer_list<std::string_view> terms) {
+    for (int i = 0; i < app.playerAnimationCount; ++i) {
+        const std::string name = ToLowerAscii(app.playerAnimations[i].name);
+        if (ContainsAnyTerm(name, terms)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void ConfigureAnimationSet(AppState *app) {
+    if (app == nullptr || app->playerAnimations == nullptr || app->playerAnimationCount <= 0) {
+        return;
+    }
+
+    app->idleAnimationIndex = FindAnimationIndex(*app, {"idle", "stand", "breath"});
+    app->moveAnimationIndex = FindAnimationIndex(*app, {"walk", "run", "move", "jog"});
+    app->chargeAnimationIndex = FindAnimationIndex(*app, {"charge", "focus", "channel", "cast"});
+    app->baseCastAnimationIndex =
+        FindAnimationIndex(*app, {"attack", "punch", "kick", "slash", "shoot", "fire"});
+    app->hatsuCastAnimationIndex =
+        FindAnimationIndex(*app, {"skill", "special", "spell", "ultimate", "cast"});
+
+    if (app->idleAnimationIndex < 0) {
+        app->idleAnimationIndex = 0;
+    }
+    if (app->moveAnimationIndex < 0) {
+        app->moveAnimationIndex = app->idleAnimationIndex;
+    }
+    if (app->chargeAnimationIndex < 0) {
+        app->chargeAnimationIndex = app->idleAnimationIndex;
+    }
+    if (app->baseCastAnimationIndex < 0) {
+        app->baseCastAnimationIndex = app->moveAnimationIndex;
+    }
+    if (app->hatsuCastAnimationIndex < 0) {
+        app->hatsuCastAnimationIndex = app->baseCastAnimationIndex;
+    }
+}
+
+int AnimationIndexForState(const AppState &app, AnimState state) {
+    switch (state) {
+    case AnimState::Idle:
+        return app.idleAnimationIndex;
+    case AnimState::Move:
+        return app.moveAnimationIndex;
+    case AnimState::Charge:
+        return app.chargeAnimationIndex;
+    case AnimState::CastBase:
+        return app.baseCastAnimationIndex;
+    case AnimState::CastHatsu:
+        return app.hatsuCastAnimationIndex;
+    }
+    return app.idleAnimationIndex;
+}
+
+void SetAnimationState(AppState *app, AnimState state) {
+    if (app == nullptr || app->animationState == state) {
+        return;
+    }
+    app->animationState = state;
+    app->activeAnimationFrame = 0.0F;
+    app->activeAnimationIndex = -1;
+}
+
+void ResolveModelBounds(const Model &model, BoundingBox *outBounds, int *outSelectedMeshes) {
+    if (outBounds == nullptr || outSelectedMeshes == nullptr) {
+        return;
+    }
+
+    std::vector<std::pair<BoundingBox, int>> candidates;
+    candidates.reserve(static_cast<std::size_t>(std::max(0, model.meshCount)));
+    int maxVertexCount = 0;
+    for (int i = 0; i < model.meshCount; ++i) {
+        const BoundingBox meshBounds = GetMeshBoundingBox(model.meshes[i]);
+        const int vertexCount = model.meshes[i].vertexCount;
+        if (!IsUsableMeshBounds(meshBounds, vertexCount)) {
+            continue;
+        }
+        candidates.push_back({meshBounds, vertexCount});
+        maxVertexCount = std::max(maxVertexCount, vertexCount);
+    }
+
+    if (candidates.empty()) {
+        *outBounds = GetModelBoundingBox(model);
+        *outSelectedMeshes = 0;
+        return;
+    }
+
+    const int threshold = std::max(6, maxVertexCount / 10);
+    bool hasMergedBounds = false;
+    BoundingBox mergedBounds{};
+    int selectedMeshes = 0;
+    for (const auto &[bounds, vertexCount] : candidates) {
+        if (vertexCount < threshold) {
+            continue;
+        }
+        if (!hasMergedBounds) {
+            mergedBounds = bounds;
+            hasMergedBounds = true;
+        } else {
+            mergedBounds = MergeBounds(mergedBounds, bounds);
+        }
+        selectedMeshes += 1;
+    }
+
+    if (!hasMergedBounds) {
+        for (const auto &[bounds, vertexCount] : candidates) {
+            (void)vertexCount;
+            if (!hasMergedBounds) {
+                mergedBounds = bounds;
+                hasMergedBounds = true;
+            } else {
+                mergedBounds = MergeBounds(mergedBounds, bounds);
+            }
+            selectedMeshes += 1;
+        }
+    }
+
+    *outBounds = hasMergedBounds ? mergedBounds : GetModelBoundingBox(model);
+    *outSelectedMeshes = selectedMeshes;
 }
 
 void TryLoadPlayerModel(AppState *app) {
@@ -427,29 +602,17 @@ void TryLoadPlayerModel(AppState *app) {
             if (tex.width <= 1 || tex.height <= 1) {
                 model.materials[i].maps[MATERIAL_MAP_DIFFUSE].texture = Texture2D{};
             }
-            model.materials[i].maps[MATERIAL_MAP_DIFFUSE].color =
-                kMaterialPalette[static_cast<std::size_t>(i) % kMaterialPalette.size()];
+            const Color palette = kMaterialPalette[static_cast<std::size_t>(i) % kMaterialPalette.size()];
+            model.materials[i].maps[MATERIAL_MAP_DIFFUSE].color = palette;
+            model.materials[i].maps[MATERIAL_MAP_EMISSION].color =
+                Color{static_cast<unsigned char>(palette.r / 2), static_cast<unsigned char>(palette.g / 2),
+                      static_cast<unsigned char>(palette.b / 2), 255};
         }
     }
 
-    bool hasMergedBounds = false;
-    BoundingBox mergedBounds{};
+    BoundingBox chosenBounds{};
     int selectedMeshes = 0;
-    for (int i = 0; i < model.meshCount; ++i) {
-        const BoundingBox meshBounds = GetMeshBoundingBox(model.meshes[i]);
-        if (!IsUsableMeshBounds(meshBounds, model.meshes[i].vertexCount)) {
-            continue;
-        }
-        if (!hasMergedBounds) {
-            mergedBounds = meshBounds;
-            hasMergedBounds = true;
-        } else {
-            mergedBounds = MergeBounds(mergedBounds, meshBounds);
-        }
-        selectedMeshes += 1;
-    }
-
-    const BoundingBox chosenBounds = hasMergedBounds ? mergedBounds : GetModelBoundingBox(model);
+    ResolveModelBounds(model, &chosenBounds, &selectedMeshes);
     const float height = chosenBounds.max.y - chosenBounds.min.y;
     const float width = chosenBounds.max.x - chosenBounds.min.x;
     const float depth = chosenBounds.max.z - chosenBounds.min.z;
@@ -466,7 +629,7 @@ void TryLoadPlayerModel(AppState *app) {
     }
 
     if (height > 0.001F) {
-        app->playerModelScale = std::clamp(kPlayerModelTargetHeight / height, 0.01F, 5.0F);
+        app->playerModelScale = std::clamp(kPlayerModelTargetHeight / height, 0.03F, 4.0F);
         app->playerModelPivot = {centerX, chosenBounds.min.y, centerZ};
         app->playerModelAuraRadius =
             std::max(width, depth) * app->playerModelScale * 0.65F + 0.26F;
@@ -476,17 +639,42 @@ void TryLoadPlayerModel(AppState *app) {
         app->playerModelAuraRadius = 0.62F;
     }
 
+    int animationCount = 0;
+    ModelAnimation *animations = LoadModelAnimations(modelPath.c_str(), &animationCount);
+    if (animations != nullptr && animationCount > 0) {
+        app->playerAnimations = animations;
+        app->playerAnimationCount = animationCount;
+        ConfigureAnimationSet(app);
+    }
+
     app->playerModelStatus += " | meshes " + std::to_string(selectedMeshes) + "/" +
                               std::to_string(model.meshCount);
+    app->playerModelStatus += " | anims " + std::to_string(app->playerAnimationCount);
 }
 
 void UnloadPlayerModel(AppState *app) {
-    if (app == nullptr || !app->hasPlayerModel) {
+    if (app == nullptr) {
+        return;
+    }
+    if (app->playerAnimations != nullptr) {
+        UnloadModelAnimations(app->playerAnimations, app->playerAnimationCount);
+        app->playerAnimations = nullptr;
+        app->playerAnimationCount = 0;
+    }
+    if (!app->hasPlayerModel) {
+        app->playerModelStatus = "Model unloaded";
         return;
     }
     UnloadModel(app->playerModel);
     app->hasPlayerModel = false;
     app->playerModelHasTexture = false;
+    app->idleAnimationIndex = -1;
+    app->moveAnimationIndex = -1;
+    app->chargeAnimationIndex = -1;
+    app->baseCastAnimationIndex = -1;
+    app->hatsuCastAnimationIndex = -1;
+    app->activeAnimationIndex = -1;
+    app->activeAnimationFrame = 0.0F;
     app->playerModelStatus = "Model unloaded";
 }
 
@@ -498,6 +686,15 @@ void StartWorld(AppState *app, const nen::Character &character) {
     app->facingDirection = {0.0F, -1.0F};
     app->chargingAura = false;
     app->chargeEffectTimer = 0.0F;
+    app->playerMoveSpeed = 0.0F;
+    app->proceduralAnimTime = 0.0F;
+    app->modelBobOffset = 0.0F;
+    app->modelLeanDegrees = 0.0F;
+    app->modelCastLeanDegrees = 0.0F;
+    app->animationState = AnimState::Idle;
+    app->activeAnimationIndex = -1;
+    app->activeAnimationFrame = 0.0F;
+    app->queuedAction = QueuedAction{};
     app->selectedBaseType = character.naturalType;
     app->baseAttackCooldown = 0.0F;
     app->hatsuCooldown = 0.0F;
@@ -842,10 +1039,6 @@ void ClampPlayerToArena(AppState *app) {
 }
 
 void UpdatePlayerMovement(AppState *app, float dt) {
-    if (app->chargingAura) {
-        return;
-    }
-
     Vector2 movement{0.0F, 0.0F};
     if (IsKeyDown(KEY_W) || IsKeyDown(KEY_UP)) {
         movement.y -= 1.0F;
@@ -867,7 +1060,11 @@ void UpdatePlayerMovement(AppState *app, float dt) {
         app->facingDirection = movement;
     }
 
-    const float speed = 320.0F;
+    float speed = app->chargingAura ? 0.0F : 320.0F;
+    if (app->queuedAction.queued) {
+        speed *= 0.58F;
+    }
+    app->playerMoveSpeed = speed * std::sqrt(movement.x * movement.x + movement.y * movement.y);
     app->playerPosition.x += movement.x * speed * dt;
     app->playerPosition.y += movement.y * speed * dt;
     ClampPlayerToArena(app);
@@ -903,16 +1100,7 @@ void UpdateBaseTypeSelection(AppState *app) {
     }
 }
 
-void CastBaseAttack(AppState *app, Vector2 target) {
-    if (app->baseAttackCooldown > 0.0F) {
-        app->statusMessage = "Base attack recharging.";
-        return;
-    }
-    if (!nen::TryConsumeAura(&app->player, kBaseAttackAuraCost)) {
-        app->statusMessage = "Not enough aura for base attack.";
-        return;
-    }
-
+void ExecuteBaseAttack(AppState *app, Vector2 target) {
     const Vector2 origin{app->playerPosition.x + app->playerSize.x * 0.5F,
                          app->playerPosition.y + app->playerSize.y * 0.38F};
     const Vector2 aim = Normalize2D({target.x - origin.x, target.y - origin.y});
@@ -920,21 +1108,11 @@ void CastBaseAttack(AppState *app, Vector2 target) {
     const int damage =
         nen::ComputeAttackDamage(app->player.naturalType, app->selectedBaseType, kBaseAttackPower);
     SpawnBaseAttack(&app->activeAttacks, app->selectedBaseType, origin, target, damage);
-    app->baseAttackCooldown = 0.24F;
     app->statusMessage =
         "Base aura attack cast: " + std::string(nen::ToString(app->selectedBaseType)) + ".";
 }
 
-void CastHatsu(AppState *app, Vector2 target) {
-    if (app->hatsuCooldown > 0.0F) {
-        app->statusMessage = "Hatsu still cooling down.";
-        return;
-    }
-    if (!nen::TryConsumeAura(&app->player, kHatsuAuraCost)) {
-        app->statusMessage = "Not enough aura for hatsu.";
-        return;
-    }
-
+void ExecuteHatsu(AppState *app, Vector2 target) {
     const Vector2 origin{app->playerPosition.x + app->playerSize.x * 0.5F,
                          app->playerPosition.y + app->playerSize.y * 0.3F};
     const Vector2 aim = Normalize2D({target.x - origin.x, target.y - origin.y});
@@ -946,8 +1124,127 @@ void CastHatsu(AppState *app, Vector2 target) {
                    (static_cast<float>(potency) / 100.0F)));
 
     SpawnHatsuAttack(&app->activeAttacks, app->player.naturalType, origin, target, damage);
-    app->hatsuCooldown = 2.8F;
     app->statusMessage = "Hatsu activated: " + app->player.hatsuName;
+}
+
+bool QueueAction(AppState *app, bool hatsu, Vector2 target) {
+    if (app->queuedAction.queued) {
+        app->statusMessage = "Action in progress.";
+        return false;
+    }
+
+    if (hatsu) {
+        if (app->hatsuCooldown > 0.0F) {
+            app->statusMessage = "Hatsu still cooling down.";
+            return false;
+        }
+        if (!nen::TryConsumeAura(&app->player, kHatsuAuraCost)) {
+            app->statusMessage = "Not enough aura for hatsu.";
+            return false;
+        }
+        app->hatsuCooldown = 2.8F;
+    } else {
+        if (app->baseAttackCooldown > 0.0F) {
+            app->statusMessage = "Base attack recharging.";
+            return false;
+        }
+        if (!nen::TryConsumeAura(&app->player, kBaseAttackAuraCost)) {
+            app->statusMessage = "Not enough aura for base attack.";
+            return false;
+        }
+        app->baseAttackCooldown = 0.24F;
+    }
+
+    const Vector2 origin{app->playerPosition.x + app->playerSize.x * 0.5F,
+                         app->playerPosition.y + app->playerSize.y * 0.4F};
+    app->facingDirection = Normalize2D({target.x - origin.x, target.y - origin.y});
+    app->queuedAction = {
+        .queued = true,
+        .hatsu = hatsu,
+        .fired = false,
+        .target = target,
+        .timer = 0.0F,
+        .triggerSeconds = hatsu ? 0.22F : 0.14F,
+        .finishSeconds = hatsu ? 0.46F : 0.30F,
+    };
+    app->statusMessage = hatsu ? "Preparing hatsu..." : "Preparing base attack...";
+    return true;
+}
+
+void UpdateQueuedAction(AppState *app, float dt) {
+    if (!app->queuedAction.queued) {
+        return;
+    }
+
+    app->queuedAction.timer += dt;
+    if (!app->queuedAction.fired && app->queuedAction.timer >= app->queuedAction.triggerSeconds) {
+        if (app->queuedAction.hatsu) {
+            ExecuteHatsu(app, app->queuedAction.target);
+        } else {
+            ExecuteBaseAttack(app, app->queuedAction.target);
+        }
+        app->queuedAction.fired = true;
+    }
+    if (app->queuedAction.timer >= app->queuedAction.finishSeconds) {
+        app->queuedAction = QueuedAction{};
+    }
+}
+
+void UpdatePlayerAnimation(AppState *app, float dt) {
+    const float moveNorm = std::clamp(app->playerMoveSpeed / 320.0F, 0.0F, 1.0F);
+    app->proceduralAnimTime += dt * (1.4F + moveNorm * 6.0F);
+    app->modelBobOffset = std::sin(app->proceduralAnimTime) * (0.06F * moveNorm);
+    if (app->chargingAura) {
+        app->modelBobOffset += std::sin(app->chargeEffectTimer * 5.4F) * 0.03F;
+    }
+    app->modelLeanDegrees = std::sin(app->proceduralAnimTime * 0.7F) * (8.0F * moveNorm);
+    app->modelCastLeanDegrees = app->queuedAction.queued ? std::sin(app->queuedAction.timer * 14.0F) * 2.5F : 0.0F;
+
+    AnimState targetState = AnimState::Idle;
+    if (app->queuedAction.queued) {
+        targetState = app->queuedAction.hatsu ? AnimState::CastHatsu : AnimState::CastBase;
+    } else if (app->chargingAura) {
+        targetState = AnimState::Charge;
+    } else if (moveNorm > 0.18F) {
+        targetState = AnimState::Move;
+    }
+    SetAnimationState(app, targetState);
+
+    if (app->playerAnimations == nullptr || app->playerAnimationCount <= 0) {
+        return;
+    }
+
+    const int animationIndex = AnimationIndexForState(*app, app->animationState);
+    if (animationIndex < 0 || animationIndex >= app->playerAnimationCount) {
+        return;
+    }
+    const ModelAnimation animation = app->playerAnimations[animationIndex];
+    if (!IsModelAnimationValid(app->playerModel, animation) || animation.frameCount <= 0) {
+        return;
+    }
+
+    const bool loop = app->animationState != AnimState::CastBase &&
+                      app->animationState != AnimState::CastHatsu;
+    const float speed =
+        (app->animationState == AnimState::CastBase || app->animationState == AnimState::CastHatsu)
+            ? 34.0F
+            : 24.0F + moveNorm * 8.0F;
+    app->activeAnimationIndex = animationIndex;
+    if (!loop && app->queuedAction.queued) {
+        const float clipDuration = static_cast<float>(animation.frameCount) / std::max(1.0F, speed);
+        app->queuedAction.triggerSeconds =
+            app->queuedAction.hatsu ? clipDuration * 0.44F : clipDuration * 0.34F;
+        app->queuedAction.finishSeconds = clipDuration + 0.07F;
+    }
+    app->activeAnimationFrame += dt * speed;
+
+    int frame = 0;
+    if (loop) {
+        frame = static_cast<int>(app->activeAnimationFrame) % animation.frameCount;
+    } else {
+        frame = std::min(animation.frameCount - 1, static_cast<int>(app->activeAnimationFrame));
+    }
+    UpdateModelAnimation(app->playerModel, animation, frame);
 }
 
 void ApplyAttackOutcome(AppState *app, const AttackOutcome &outcome) {
@@ -1032,8 +1329,6 @@ void UpdateWorld(AppState *app) {
 
     RechargeAura(app, dt);
     UpdatePlayerMovement(app, dt);
-    MoveEnemy(app, dt);
-    UpdateCombatCamera(app, dt);
 
     Vector2 target = EnemyCenter(*app);
     if (app->use3DView) {
@@ -1050,11 +1345,16 @@ void UpdateWorld(AppState *app) {
     const bool hatsuCast = IsKeyPressed(KEY_Q) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
 
     if (baseCast && !app->chargingAura) {
-        CastBaseAttack(app, target);
+        QueueAction(app, false, target);
     }
     if (hatsuCast && !app->chargingAura) {
-        CastHatsu(app, target);
+        QueueAction(app, true, target);
     }
+
+    UpdatePlayerAnimation(app, dt);
+    UpdateQueuedAction(app, dt);
+    MoveEnemy(app, dt);
+    UpdateCombatCamera(app, dt);
 
     const AttackOutcome outcome =
         UpdateAttackEffects(&app->activeAttacks, dt, EnemyCenter(*app), app->enemy.radius);
@@ -1452,13 +1752,14 @@ void DrawEnemy3D(const AppState &app) {
 void DrawPlayer3D(const AppState &app) {
     const Vector2 p2 = {app.playerPosition.x + app.playerSize.x * 0.5F,
                         app.playerPosition.y + app.playerSize.y * 0.5F};
-    const Vector3 anchor = ArenaToWorld(p2, 0.75F);
+    const Vector3 anchor = ArenaToWorld(p2, 0.75F + app.modelBobOffset);
     const Color aura = TypeColor(app.player.naturalType);
 
     if (app.hasPlayerModel) {
         const Vector2 facing = Normalize2D(app.facingDirection);
         const float yawDegrees =
-            std::atan2(facing.x, facing.y) * RAD2DEG + app.playerModelYawOffset;
+            std::atan2(facing.x, facing.y) * RAD2DEG + app.playerModelYawOffset +
+            app.modelLeanDegrees + app.modelCastLeanDegrees;
         const float yaw = yawDegrees * DEG2RAD;
         const Vector3 pivot{
             -app.playerModelPivot.x * app.playerModelScale,
