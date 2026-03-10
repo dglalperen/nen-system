@@ -51,7 +51,9 @@ Saved characters are stored in `~/.nen_world/characters`.
 
 3D player model:
 
-- Put your model at `assets/models/killua.glb`
+- Preferred: `assets/models/hisoka_hxh.glb`
+- Alternative fallback names: `assets/models/hisoka.glb` then `assets/models/killua.glb`
+- `.blend` files are not loaded directly by the game runtime; export to `.glb`
 - If missing or invalid, the game falls back to primitive placeholder geometry
 
 ## Tests

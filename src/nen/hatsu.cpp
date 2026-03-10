@@ -38,7 +38,7 @@ std::string_view HatsuAbilityName(Type naturalType) {
     case Type::Enhancer:
         return "Impact Dominion";
     case Type::Transmuter:
-        return "Phase Spark";
+        return "Elastic Trick";
     case Type::Emitter:
         return "Skyline Burst";
     case Type::Conjurer:
@@ -56,7 +56,7 @@ std::string_view HatsuAbilityDescription(Type naturalType) {
     case Type::Enhancer:
         return "Detonates a close-range aura quake with heavy burst damage.";
     case Type::Transmuter:
-        return "Launches volatile lightning arcs with erratic movement.";
+        return "Transmutes aura into elastic strands that latch and snap targets around.";
     case Type::Emitter:
         return "Fires a fast long-range beamlike aura projectile.";
     case Type::Conjurer:

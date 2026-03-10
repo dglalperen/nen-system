@@ -209,22 +209,31 @@ void SaveCurrentCharacter(AppState *app) {
     }
 }
 
-std::string ResolveKilluaModelPath() {
-    const std::filesystem::path relative =
-        std::filesystem::path("assets") / "models" / "killua.glb";
-    const std::array<std::filesystem::path, 6> candidates = {
-        relative,
-        std::filesystem::path("..") / relative,
-        std::filesystem::path("../..") / relative,
-        std::filesystem::path("../../..") / relative,
-        std::filesystem::path(GetWorkingDirectory()) / relative,
-        std::filesystem::path(GetApplicationDirectory()) / relative,
+std::vector<std::filesystem::path> CandidateModelFiles() {
+    return {
+        std::filesystem::path("assets") / "models" / "hisoka_hxh.glb",
+        std::filesystem::path("assets") / "models" / "hisoka.glb",
+        std::filesystem::path("assets") / "models" / "killua.glb",
     };
+}
 
-    for (const auto &candidate : candidates) {
-        std::error_code ec;
-        if (std::filesystem::exists(candidate, ec) && !ec) {
-            return std::filesystem::weakly_canonical(candidate, ec).string();
+std::string ResolveCharacterModelPath() {
+    const auto modelFiles = CandidateModelFiles();
+    for (const auto &relative : modelFiles) {
+        const std::array<std::filesystem::path, 6> candidates = {
+            relative,
+            std::filesystem::path("..") / relative,
+            std::filesystem::path("../..") / relative,
+            std::filesystem::path("../../..") / relative,
+            std::filesystem::path(GetWorkingDirectory()) / relative,
+            std::filesystem::path(GetApplicationDirectory()) / relative,
+        };
+
+        for (const auto &candidate : candidates) {
+            std::error_code ec;
+            if (std::filesystem::exists(candidate, ec) && !ec) {
+                return std::filesystem::weakly_canonical(candidate, ec).string();
+            }
         }
     }
     return {};
@@ -235,39 +244,42 @@ void TryLoadPlayerModel(AppState *app) {
         return;
     }
 
-    const std::string modelPath = ResolveKilluaModelPath();
+    const std::string modelPath = ResolveCharacterModelPath();
     app->playerModelPath = modelPath;
     if (modelPath.empty()) {
-        app->playerModelStatus = "Killua model not found (checked assets/models/killua.glb paths)";
-        app->statusMessage = "Killua model not found. Using fallback character geometry.";
+        app->playerModelStatus = "No model found (tried hisoka_hxh.glb, hisoka.glb, killua.glb)";
+        app->statusMessage = "Character model not found. Using fallback geometry.";
         return;
     }
 
     Model model = LoadModel(modelPath.c_str());
     if (!IsModelValid(model)) {
-        app->playerModelStatus = "Killua model file found but failed to load";
-        app->statusMessage = "Found killua.glb but loading failed. Using fallback.";
+        app->playerModelStatus = "Model file found but failed to load";
+        app->statusMessage = "Model file found but loading failed. Using fallback.";
         return;
     }
 
     app->playerModel = model;
     app->hasPlayerModel = true;
-    app->playerModelStatus = "Killua model loaded";
+    app->playerModelStatus =
+        "Model loaded: " + std::filesystem::path(modelPath).filename().string();
 
     BoundingBox chosenBounds = GetModelBoundingBox(model);
-    float chosenScore = -1.0F;
+    int bestVertexCount = -1;
     for (int i = 0; i < model.meshCount; ++i) {
         const BoundingBox meshBounds = GetMeshBoundingBox(model.meshes[i]);
         const float w = meshBounds.max.x - meshBounds.min.x;
         const float h = meshBounds.max.y - meshBounds.min.y;
         const float d = meshBounds.max.z - meshBounds.min.z;
-        if (h <= 0.02F || w <= 0.001F || d <= 0.001F) {
+        if (h <= 0.02F || w <= 0.02F || d <= 0.02F) {
             continue;
         }
-        const float volume = w * h * d;
-        const float score = volume * (h > 6.0F ? 0.15F : 1.0F);
-        if (score > chosenScore) {
-            chosenScore = score;
+        if (h > 60.0F || w > 60.0F || d > 60.0F) {
+            continue;
+        }
+        const int vertexCount = model.meshes[i].vertexCount;
+        if (vertexCount > bestVertexCount) {
+            bestVertexCount = vertexCount;
             chosenBounds = meshBounds;
         }
     }

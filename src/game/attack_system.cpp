@@ -77,9 +77,10 @@ void SpawnTransmuter(std::vector<AttackEffect> *effects, bool hatsu, Vector2 ori
     const Vector2 direction = NormalizeSafe({target.x - origin.x, target.y - origin.y});
     effects->push_back(MakeEffect(
         nen::Type::Transmuter, hatsu, origin, target,
-        {direction.x * (hatsu ? 590.0F : 500.0F), direction.y * (hatsu ? 590.0F : 500.0F)},
-        hatsu ? 12.0F : 10.0F, hatsu ? 1.20F : 1.0F, damage,
-        static_cast<float>(GetRandomValue(0, 360)) * DEG2RAD));
+        {direction.x * (hatsu ? 610.0F : 500.0F), direction.y * (hatsu ? 610.0F : 500.0F)},
+        hatsu ? 12.0F : 10.0F, hatsu ? 1.25F : 1.0F, damage,
+        static_cast<float>(GetRandomValue(0, 360)) * DEG2RAD, hatsu ? 1.1F : 0.0F,
+        hatsu ? 1.0F : 0.0F, hatsu ? 0.45F : 0.0F));
     if (hatsu) {
         const Vector2 alt = Rotate(direction, 0.2F);
         effects->push_back(MakeEffect(nen::Type::Transmuter, true, origin, target,
@@ -94,9 +95,14 @@ void SpawnEmitter(std::vector<AttackEffect> *effects, bool hatsu, Vector2 origin
     const Vector2 direction = NormalizeSafe({target.x - origin.x, target.y - origin.y});
     effects->push_back(MakeEffect(
         nen::Type::Emitter, hatsu, origin, target,
-        {direction.x * (hatsu ? 760.0F : 620.0F), direction.y * (hatsu ? 760.0F : 620.0F)},
-        hatsu ? 16.0F : 11.0F, hatsu ? 1.18F : 1.0F,
+        {direction.x * (hatsu ? 890.0F : 700.0F), direction.y * (hatsu ? 890.0F : 700.0F)},
+        hatsu ? 14.0F : 9.0F, hatsu ? 0.92F : 0.78F,
         hatsu ? static_cast<int>(damage * 1.2F) : damage));
+    if (hatsu) {
+        effects->push_back(MakeEffect(nen::Type::Emitter, true, origin, target,
+                                      {direction.x * 760.0F, direction.y * 760.0F}, 10.0F, 0.95F,
+                                      static_cast<int>(damage * 0.55F), 0.0F, 0.0F, 0.0F, 0.0F));
+    }
 }
 
 void SpawnConjurer(std::vector<AttackEffect> *effects, bool hatsu, Vector2 origin, Vector2 target,
@@ -201,7 +207,13 @@ AttackOutcome UpdateAttackEffects(std::vector<AttackEffect> *effects, float dt,
             effect.position.y += effect.velocity.y * dt;
             const Vector2 direction = NormalizeSafe(effect.velocity);
             const Vector2 tangent{-direction.y, direction.x};
-            const float sway = std::sin(effect.phase * 6.0F) * (effect.hatsu ? 130.0F : 90.0F) * dt;
+            if (effect.homingStrength > 0.001F) {
+                const Vector2 toTarget = NormalizeSafe(
+                    {effect.target.x - effect.position.x, effect.target.y - effect.position.y});
+                effect.velocity.x += toTarget.x * effect.homingStrength * 160.0F * dt;
+                effect.velocity.y += toTarget.y * effect.homingStrength * 160.0F * dt;
+            }
+            const float sway = std::sin(effect.phase * 7.0F) * (effect.hatsu ? 170.0F : 95.0F) * dt;
             effect.position.x += tangent.x * sway;
             effect.position.y += tangent.y * sway;
             break;
