@@ -62,7 +62,10 @@ nen_enable_sanitizers(nen_core)
 add_library(nen_game
     src/game/attack_system.cpp
     src/game/game.cpp
+    src/game/particle_system.cpp
     src/game/persistence.cpp
+    src/game/ui_renderer.cpp
+    src/game/world_renderer.cpp
 )
 
 target_link_libraries(nen_game PUBLIC nen_core raylib)
