@@ -342,122 +342,148 @@ int ActiveParticleCount(const ParticleSystem &ps) {
 
 // ── Pre-built nen effect configs ──────────────────────────────────────────────
 
+// Nen aura — manga-accurate white smoke rising from the body.
+// typeColor is kept for hatsu/attack effects where the type manifests visually.
+// Base aura (Ten/Ren/Ko) is near-white like vapor from skin.
+
+// Subtle cool-white puff blending gently toward typeColor at low alpha
+static Color AuraSmokeColor(Color typeColor) {
+    // Near-white with a very faint type tint
+    return Color{
+        static_cast<unsigned char>(220 + (typeColor.r - 220) / 8),
+        static_cast<unsigned char>(225 + (typeColor.g - 225) / 8),
+        static_cast<unsigned char>(235 + (typeColor.b - 235) / 8),
+        160,
+    };
+}
+
 EmitterConfig MakeAuraTenConfig(Color typeColor) {
+    // Ten: passive containment — barely visible wisps hugging the body.
+    // Very close spawn (radius 0.18), slow upward drift, alpha smoke.
     EmitterConfig cfg{};
     cfg.shape       = EmitterShape::Ring;
-    cfg.radius      = 0.45F;
+    cfg.radius      = 0.18F;   // tight to body surface
     cfg.arc         = 6.2832F;
-    cfg.spawnRate   = 3.0F;
+    cfg.spawnRate   = 6.0F;
     cfg.blend       = EmitterBlend::Alpha;
-    cfg.speedMin    = 0.08F;
-    cfg.speedMax    = 0.22F;
-    cfg.lifetimeMin = 0.8F;
-    cfg.lifetimeMax = 1.4F;
-    cfg.sizeStart   = 0.05F;
-    cfg.sizeEnd     = 0.01F;
-    cfg.colorStart  = typeColor;
+    cfg.speedMin    = 0.03F;
+    cfg.speedMax    = 0.10F;
+    cfg.lifetimeMin = 1.0F;
+    cfg.lifetimeMax = 1.8F;
+    cfg.sizeStart   = 0.06F;
+    cfg.sizeEnd     = 0.02F;
+    cfg.colorStart  = AuraSmokeColor(typeColor);
     cfg.emitterLife = -1.0F;
     return cfg;
 }
 
-EmitterConfig MakeAuraRenConfig(Color typeColor) {
+EmitterConfig MakeAuraRenConfig(Color /*typeColor*/) {
+    // Ren: amplified output — thick white aura bursting off the body,
+    // denser and larger than Ten, additive so it glows brightly.
     EmitterConfig cfg{};
     cfg.shape       = EmitterShape::Ring;
-    cfg.radius      = 0.50F;
+    cfg.radius      = 0.22F;   // still close to body, just slightly wider
     cfg.arc         = 6.2832F;
-    cfg.spawnRate   = 18.0F;
+    cfg.spawnRate   = 28.0F;
     cfg.blend       = EmitterBlend::Additive;
-    cfg.speedMin    = 0.15F;
-    cfg.speedMax    = 0.35F;
-    cfg.lifetimeMin = 0.5F;
-    cfg.lifetimeMax = 1.0F;
+    cfg.speedMin    = 0.08F;
+    cfg.speedMax    = 0.28F;
+    cfg.lifetimeMin = 0.6F;
+    cfg.lifetimeMax = 1.2F;
     cfg.sizeStart   = 0.10F;
-    cfg.sizeEnd     = 0.02F;
-    cfg.colorStart  = typeColor;
+    cfg.sizeEnd     = 0.01F;
+    cfg.colorStart  = {245, 248, 255, 200};  // bright cool white
     cfg.emitterLife = -1.0F;
     return cfg;
 }
 
-EmitterConfig MakeKoChargeConfig(Color typeColor) {
+EmitterConfig MakeKoChargeConfig(Color /*typeColor*/) {
+    // Ko: concentrated — all aura focused to one point,
+    // convergence shown as warm white streaks rushing inward.
     EmitterConfig cfg{};
     cfg.shape       = EmitterShape::Cone;
-    cfg.radius      = 1.5F;
-    cfg.coneAngle   = 3.14159F; // PI — full sphere inward
-    cfg.spawnRate   = 25.0F;
+    cfg.radius      = 1.2F;
+    cfg.coneAngle   = 3.14159F;
+    cfg.spawnRate   = 30.0F;
     cfg.blend       = EmitterBlend::Additive;
-    cfg.speedMin    = 0.8F;
-    cfg.speedMax    = 2.0F;
-    cfg.lifetimeMin = 0.2F;
-    cfg.lifetimeMax = 0.5F;
-    cfg.sizeStart   = 0.09F;
-    cfg.sizeEnd     = 0.03F;
-    cfg.colorStart  = typeColor;
+    cfg.speedMin    = 1.0F;
+    cfg.speedMax    = 2.4F;
+    cfg.lifetimeMin = 0.15F;
+    cfg.lifetimeMax = 0.4F;
+    cfg.sizeStart   = 0.08F;
+    cfg.sizeEnd     = 0.02F;
+    cfg.colorStart  = {255, 252, 235, 220};  // warm white / very light gold
     cfg.emitterLife = -1.0F;
     return cfg;
 }
 
 EmitterConfig MakeTransitionBurstConfig(Color typeColor) {
+    // Mode switch — white flash burst (type color just barely tinted)
     EmitterConfig cfg{};
     cfg.shape       = EmitterShape::Point;
-    cfg.burstCount  = 20;
+    cfg.burstCount  = 24;
     cfg.blend       = EmitterBlend::Additive;
-    cfg.speedMin    = 0.4F;
-    cfg.speedMax    = 1.2F;
-    cfg.lifetimeMin = 0.15F;
-    cfg.lifetimeMax = 0.4F;
-    cfg.sizeStart   = 0.12F;
+    cfg.speedMin    = 0.5F;
+    cfg.speedMax    = 1.4F;
+    cfg.lifetimeMin = 0.12F;
+    cfg.lifetimeMax = 0.35F;
+    cfg.sizeStart   = 0.14F;
     cfg.sizeEnd     = 0.0F;
-    cfg.colorStart  = typeColor;
+    cfg.colorStart  = {245, 248, 255, 220};
     cfg.emitterLife = 0.4F;
+    (void)typeColor;
     return cfg;
 }
 
 EmitterConfig MakeAttackTrailConfig(Color typeColor) {
+    // Attack trail — type color shows here (hatsu manifests type)
     EmitterConfig cfg{};
     cfg.shape       = EmitterShape::Point;
     cfg.spawnRate   = 0.0F;
-    cfg.burstCount  = 2;
+    cfg.burstCount  = 3;
     cfg.blend       = EmitterBlend::Additive;
-    cfg.speedMin    = 0.01F;
-    cfg.speedMax    = 0.05F;
-    cfg.lifetimeMin = 0.06F;
-    cfg.lifetimeMax = 0.16F;
-    cfg.sizeStart   = 0.07F;
+    cfg.speedMin    = 0.02F;
+    cfg.speedMax    = 0.08F;
+    cfg.lifetimeMin = 0.08F;
+    cfg.lifetimeMax = 0.20F;
+    cfg.sizeStart   = 0.08F;
     cfg.sizeEnd     = 0.01F;
     cfg.colorStart  = typeColor;
-    cfg.emitterLife = 0.2F;
+    cfg.emitterLife = 0.25F;
     return cfg;
 }
 
 EmitterConfig MakeImpactSmokeConfig(Color typeColor) {
+    // Impact smoke — white with slight type tint
     EmitterConfig cfg{};
     cfg.shape       = EmitterShape::Point;
-    cfg.burstCount  = 14;
+    cfg.burstCount  = 16;
     cfg.blend       = EmitterBlend::Alpha;
-    cfg.speedMin    = 0.2F;
-    cfg.speedMax    = 0.6F;
-    cfg.lifetimeMin = 0.25F;
-    cfg.lifetimeMax = 0.55F;
-    cfg.sizeStart   = 0.10F;
+    cfg.speedMin    = 0.25F;
+    cfg.speedMax    = 0.70F;
+    cfg.lifetimeMin = 0.30F;
+    cfg.lifetimeMax = 0.65F;
+    cfg.sizeStart   = 0.12F;
     cfg.sizeEnd     = 0.0F;
-    cfg.colorStart  = typeColor;
-    cfg.emitterLife = 0.6F;
+    cfg.colorStart  = AuraSmokeColor(typeColor);
+    cfg.emitterLife = 0.7F;
     return cfg;
 }
 
 EmitterConfig MakeImpactFlashConfig(Color typeColor) {
+    // Impact flash — full type color; this is hatsu energy releasing
     EmitterConfig cfg{};
     cfg.shape       = EmitterShape::Point;
-    cfg.burstCount  = 8;
+    cfg.burstCount  = 10;
     cfg.blend       = EmitterBlend::Additive;
-    cfg.speedMin    = 0.3F;
-    cfg.speedMax    = 1.0F;
-    cfg.lifetimeMin = 0.07F;
-    cfg.lifetimeMax = 0.18F;
-    cfg.sizeStart   = 0.18F;
+    cfg.speedMin    = 0.4F;
+    cfg.speedMax    = 1.2F;
+    cfg.lifetimeMin = 0.06F;
+    cfg.lifetimeMax = 0.20F;
+    cfg.sizeStart   = 0.20F;
     cfg.sizeEnd     = 0.0F;
     cfg.colorStart  = typeColor;
-    cfg.emitterLife = 0.2F;
+    cfg.emitterLife = 0.25F;
     return cfg;
 }
 

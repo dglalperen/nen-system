@@ -273,23 +273,23 @@ void DrawPlayer3D(const AppState &app) {
     }
 
     const float auraRadius = app.hasPlayerModel ? app.playerModelAuraRadius : 0.48F;
-    // Floor ring — type color indicator, always visible
+    // Floor ring — very faint type-color indicator at ground level
     DrawCircle3D({anchor.x, 0.02F, anchor.z}, auraRadius,
-                 {1.0F, 0.0F, 0.0F}, 90.0F, Fade(aura, 0.55F));
+                 {1.0F, 0.0F, 0.0F}, 90.0F, Fade(aura, 0.18F));
 
     if (app.chargingAura) {
-        // Stacked rising rings — charge effect driven by particles + geometry rings
-        // (no sphere wireframe; particles handle the volumetric look)
+        // Rising white rings (charge visuals; particles handle the volumetric density)
         const float t     = app.chargeEffectTimer;
-        const float pulse = auraRadius + std::sin(t * 5.2F) * 0.06F;
-        const float phase = std::fmod(t * 1.8F, 1.0F);  // 0..1 rising phase
+        const float pulse = auraRadius + std::sin(t * 5.2F) * 0.05F;
+        const float phase = std::fmod(t * 1.8F, 1.0F);
+        constexpr Color kChargeRingColor = {220, 230, 245, 255};  // cool white
         for (int ring = 0; ring < 4; ++ring) {
             const float ringT  = std::fmod(phase + static_cast<float>(ring) * 0.25F, 1.0F);
-            const float height = ringT * 1.6F;                  // rises 0 → 1.6 world units
-            const float r      = pulse * (1.0F - ringT * 0.5F); // shrinks as it rises
-            const float alpha  = (1.0F - ringT) * 0.65F;
+            const float height = ringT * 1.6F;
+            const float r      = pulse * (1.0F - ringT * 0.5F);
+            const float alpha  = (1.0F - ringT) * 0.5F;
             DrawCircle3D({anchor.x, height, anchor.z}, r,
-                         {1.0F, 0.0F, 0.0F}, 90.0F, Fade(aura, alpha));
+                         {1.0F, 0.0F, 0.0F}, 90.0F, Fade(kChargeRingColor, alpha));
         }
     }
 }

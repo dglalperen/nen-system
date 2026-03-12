@@ -1284,9 +1284,9 @@ void UpdateWorld(AppState *app) {
     const bool chargeActive = !app->chargeEmitter.IsNull();
     if (app->chargingAura && !chargeActive) {
         EmitterConfig chargeCfg = MakeAuraRenConfig(TypeColor(app->player.naturalType));
-        chargeCfg.spawnRate = 28.0F;
-        chargeCfg.sizeStart = 0.14F;
-        chargeCfg.radius    = app->playerModelAuraRadius;
+        chargeCfg.spawnRate = 36.0F;  // denser while actively charging
+        chargeCfg.sizeStart = 0.13F;
+        chargeCfg.radius    = app->playerModelAuraRadius * 0.6F;  // tight to body
         app->chargeEmitter = SpawnEmitter(&app->particleSystem, chargeCfg, playerWorldPos3);
     } else if (!app->chargingAura && chargeActive) {
         KillEmitter(&app->particleSystem, app->chargeEmitter);
