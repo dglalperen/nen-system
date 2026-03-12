@@ -88,6 +88,7 @@ struct AppState {
     ParticleSystem particleSystem{};
     EmitterHandle  nenAuraEmitter{};
     EmitterHandle  koEmitter{};
+    EmitterHandle  chargeEmitter{};
 
     bool    hasCharacter = false;
     Vector2 playerPosition{kArenaBounds.x + 110.0F,

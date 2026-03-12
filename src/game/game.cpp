@@ -342,17 +342,16 @@ void TryLoadPlayerModel(AppState *app) {
             Color{211, 186, 153, 255}, Color{92, 111, 163, 255},
         };
         for (int i = 0; i < model.materialCount; ++i) {
-            Texture2D tex = model.materials[i].maps[MATERIAL_MAP_DIFFUSE].texture;
-            if (tex.width <= 1 || tex.height <= 1) {
-                model.materials[i].maps[MATERIAL_MAP_DIFFUSE].texture = Texture2D{};
-            }
             const Color palette =
                 kMaterialPalette[static_cast<std::size_t>(i) % kMaterialPalette.size()];
+            // Set diffuse color — keep existing texture so the GPU can sample it.
+            // (Clearing texture to Texture2D{} gives id=0, causing black output.)
             model.materials[i].maps[MATERIAL_MAP_DIFFUSE].color = palette;
+            // Use emission as an unlit base so the model shows color without needing lights.
             model.materials[i].maps[MATERIAL_MAP_EMISSION].color = Color{
-                static_cast<unsigned char>(palette.r / 2),
-                static_cast<unsigned char>(palette.g / 2),
-                static_cast<unsigned char>(palette.b / 2), 255};
+                static_cast<unsigned char>(palette.r * 3 / 4),
+                static_cast<unsigned char>(palette.g * 3 / 4),
+                static_cast<unsigned char>(palette.b * 3 / 4), 255};
         }
     }
 
@@ -492,7 +491,8 @@ void StartWorld(AppState *app, const nen::Character &character) {
         &app->particleSystem,
         MakeAuraTenConfig(TypeColor(character.naturalType)),
         playerWorldPos);
-    app->koEmitter = kNullEmitter;
+    app->koEmitter     = kNullEmitter;
+    app->chargeEmitter = kNullEmitter;
 }
 
 // ── Screen update functions ───────────────────────────────────────────────────
@@ -1268,16 +1268,32 @@ void UpdateWorld(AppState *app) {
         }
     }
 
-    // Keep aura emitter following player
+    // Keep all emitters following player
+    const Vector2 pCenter{app->playerPosition.x + app->playerSize.x * 0.5F,
+                          app->playerPosition.y + app->playerSize.y * 0.5F};
+    const Vector3 playerWorldPos3 = ArenaToWorld(pCenter, 0.5F);
+
     if (!app->nenAuraEmitter.IsNull()) {
-        const Vector2 p2{app->playerPosition.x + app->playerSize.x * 0.5F,
-                         app->playerPosition.y + app->playerSize.y * 0.5F};
-        MoveEmitter(&app->particleSystem, app->nenAuraEmitter, ArenaToWorld(p2));
+        MoveEmitter(&app->particleSystem, app->nenAuraEmitter, ArenaToWorld(pCenter));
     }
     if (!app->koEmitter.IsNull()) {
-        const Vector2 p2{app->playerPosition.x + app->playerSize.x * 0.5F,
-                         app->playerPosition.y + app->playerSize.y * 0.5F};
-        MoveEmitter(&app->particleSystem, app->koEmitter, ArenaToWorld(p2));
+        MoveEmitter(&app->particleSystem, app->koEmitter, playerWorldPos3);
+    }
+
+    // Charge emitter — active only while holding R
+    const bool chargeActive = !app->chargeEmitter.IsNull();
+    if (app->chargingAura && !chargeActive) {
+        EmitterConfig chargeCfg = MakeAuraRenConfig(TypeColor(app->player.naturalType));
+        chargeCfg.spawnRate = 28.0F;
+        chargeCfg.sizeStart = 0.14F;
+        chargeCfg.radius    = app->playerModelAuraRadius;
+        app->chargeEmitter = SpawnEmitter(&app->particleSystem, chargeCfg, playerWorldPos3);
+    } else if (!app->chargingAura && chargeActive) {
+        KillEmitter(&app->particleSystem, app->chargeEmitter);
+        app->chargeEmitter = kNullEmitter;
+    }
+    if (!app->chargeEmitter.IsNull()) {
+        MoveEmitter(&app->particleSystem, app->chargeEmitter, playerWorldPos3);
     }
 
     RechargeAura(app, dt);
