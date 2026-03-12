@@ -4,6 +4,9 @@
 #include <string>
 #include <string_view>
 
+#include "nen/aura_pool.hpp"
+#include "nen/technique_state.hpp"
+
 namespace nen {
 
 enum class Type { Enhancer = 1, Transmuter, Emitter, Conjurer, Manipulator, Specialist };
@@ -30,11 +33,12 @@ constexpr std::string_view ToString(Type type) {
 }
 
 struct Character {
-    std::string name;
-    Type naturalType{Type::Enhancer};
-    int auraPool{100};
-    std::string hatsuName{"Unnamed Hatsu"};
-    int hatsuPotency{100};
+    std::string    name;
+    Type           naturalType{Type::Enhancer};
+    AuraPool       auraPool{};
+    TechniqueState techniques{};
+    std::string    hatsuName{"Unnamed Hatsu"};
+    int            hatsuPotency{100};
 };
 
 } // namespace nen

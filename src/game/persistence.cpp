@@ -86,7 +86,7 @@ bool ParseCharacter(std::ifstream *file, nen::Character *outCharacter) {
     *outCharacter = nen::Character{
         .name = name,
         .naturalType = static_cast<nen::Type>(typeValue),
-        .auraPool = auraPool,
+        .auraPool = nen::AuraPool{.current = static_cast<float>(auraPool)},
         .hatsuName = hatsuName,
         .hatsuPotency = hatsuPotency,
     };
@@ -129,7 +129,7 @@ bool SaveCharacter(const nen::Character &character, const std::filesystem::path 
 
     file << "name=" << character.name << '\n';
     file << "type=" << static_cast<int>(character.naturalType) << '\n';
-    file << "aura=" << character.auraPool << '\n';
+    file << "aura=" << static_cast<int>(character.auraPool.current) << '\n';
     file << "hatsu_name=" << character.hatsuName << '\n';
     file << "hatsu_potency=" << character.hatsuPotency << '\n';
     return true;

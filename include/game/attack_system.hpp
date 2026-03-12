@@ -45,6 +45,4 @@ void SpawnHatsuAttack(std::vector<AttackEffect> *effects, nen::Type attackType, 
 AttackOutcome UpdateAttackEffects(std::vector<AttackEffect> *effects, float dt,
                                   Vector2 targetCenter, float targetRadius);
 
-void DrawAttackEffects(const std::vector<AttackEffect> &effects);
-
 } // namespace game

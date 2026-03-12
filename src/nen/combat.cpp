@@ -29,10 +29,11 @@ int ComputeAttackDamage(Type naturalType, Type attackType, int basePower) {
 }
 
 bool TryConsumeAura(Character *character, int auraCost) {
-    if (character == nullptr || auraCost < 0 || character->auraPool < auraCost) {
+    if (character == nullptr || auraCost < 0 ||
+        character->auraPool.current < static_cast<float>(auraCost)) {
         return false;
     }
-    character->auraPool -= auraCost;
+    character->auraPool.current -= static_cast<float>(auraCost);
     return true;
 }
 

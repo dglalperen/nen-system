@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdarg>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -14,6 +15,9 @@
 #include "game/persistence.hpp"
 #include "nen/combat.hpp"
 #include "nen/hatsu.hpp"
+#include "nen/hatsu_spec.hpp"
+#include "nen/log.hpp"
+#include "nen/nen_system.hpp"
 #include "nen/quiz.hpp"
 #include "nen/types.hpp"
 
@@ -21,9 +25,19 @@ namespace game {
 
 namespace {
 
+// ── Aura particle (presentation layer, not serialized) ────────────────────
+struct AuraParticle {
+    Vector3 position{};
+    Vector3 velocity{};
+    float   size        = 0.06F;
+    float   alpha       = 0.3F;
+    float   lifetime    = 0.0F;
+    float   maxLifetime = 1.2F;
+    Color   color       = RAYWHITE;
+};
+
 constexpr int kWidth = 1760;
 constexpr int kHeight = 980;
-constexpr int kAuraMax = 2400;
 constexpr int kEnemyMaxHealth = 430;
 
 constexpr int kBaseAttackAuraCost = 16;
@@ -44,6 +58,7 @@ enum class Screen {
     LoadCharacter,
     Quiz,
     Reveal,
+    HatsuCreation,
     World,
 };
 
@@ -91,11 +106,20 @@ struct AppState {
     std::size_t quizQuestionIndex = 0;
     float revealTimer = 0.0F;
 
+    // HatsuCreation state
+    std::string draftHatsuName;
+    int selectedHatsuCategoryIndex = 0;  // index into HatsuCategory enum (0..5)
+    uint32_t selectedVowMask = 0;        // bitmask for 12 canonical vows
+
     nen::Character player{
-        .name = "",
+        .name        = "",
         .naturalType = nen::Type::Enhancer,
-        .auraPool = 120,
+        .auraPool    = nen::AuraPool{.current = 120.0F},
     };
+    nen::DerivedNenStats cachedNenStats{};
+    nen::HatsuSpec       cachedHatsuSpec{};
+    std::vector<AuraParticle> auraParticles;
+    float auraSpawnAccum = 0.0F;
     bool hasCharacter = false;
     Vector2 playerPosition{kArenaBounds.x + 110.0F, kArenaBounds.y + kArenaBounds.height - 130.0F};
     Vector2 playerSize{36.0F, 52.0F};
@@ -117,7 +141,6 @@ struct AppState {
     bool playerModelHasTexture = false;
     std::string playerModelPath;
     std::string playerModelStatus = "Model not loaded";
-    bool use3DView = true;
     float cameraOrbitAngle = 0.88F;
     float cameraDistance = 15.0F;
     float cameraHeight = 9.0F;
@@ -359,6 +382,10 @@ void SaveCurrentCharacter(AppState *app) {
     std::string error;
     if (!SaveCharacter(app->player, app->saveDir, &error)) {
         app->statusMessage = error;
+        NEN_ERROR("save failed: %s", error.c_str());
+    } else {
+        NEN_DEBUG("character saved  name=%s  aura=%.0f",
+                  app->player.name.c_str(), app->player.auraPool.current);
     }
 }
 
@@ -701,6 +728,12 @@ void UnloadPlayerModel(AppState *app) {
 }
 
 void StartWorld(AppState *app, const nen::Character &character) {
+    NEN_INFO("entering world  name=%s  type=%s  aura=%.0f  hatsu=%s  potency=%d",
+             character.name.c_str(),
+             nen::ToString(character.naturalType).data(),
+             character.auraPool.current,
+             character.hatsuName.c_str(),
+             character.hatsuPotency);
     app->screen = Screen::World;
     app->player = character;
     app->hasCharacter = true;
@@ -724,7 +757,6 @@ void StartWorld(AppState *app, const nen::Character &character) {
     app->hatsuCooldown = 0.0F;
     app->activeAttacks.clear();
     app->enemy = EnemyState{};
-    app->use3DView = true;
     app->cameraOrbitAngle = 0.88F;
     app->cameraDistance = 15.0F;
     app->cameraHeight = 9.0F;
@@ -733,8 +765,12 @@ void StartWorld(AppState *app, const nen::Character &character) {
     app->camera.up = {0.0F, 1.0F, 0.0F};
     app->camera.fovy = 52.0F;
     app->camera.projection = CAMERA_PERSPECTIVE;
-    app->statusMessage =
-        "LMB/SPACE base attack, RMB/Q hatsu, hold R to recover aura. MMB drag + wheel for camera.";
+    app->auraParticles.clear();
+    app->auraSpawnAccum   = 0.0F;
+    app->cachedNenStats   = nen::ComputeNenStats(app->player);
+    app->cachedHatsuSpec  = nen::BuildProceduralHatsuSpec(
+        app->player.name, app->player.naturalType, app->player.hatsuPotency);
+    app->statusMessage = "LMB/SPACE attack, RMB/Q hatsu, hold R recharge, E Ren, Z Zetsu, G Gyo, N En, K Ko.";
 }
 
 void EnsureCharacterHasHatsu(nen::Character *character) {
@@ -793,8 +829,8 @@ void UpdateMainMenu(AppState *app, bool *running) {
 void UpdateNameEntry(AppState *app) {
     HandleNameInput(&app->draftName);
 
-    const Rectangle continueButton{86.0F, 346.0F, 300.0F, 62.0F};
-    const Rectangle backButton{402.0F, 346.0F, 184.0F, 62.0F};
+    const Rectangle continueButton{86.0F, 390.0F, 300.0F, 62.0F};
+    const Rectangle backButton{402.0F, 390.0F, 184.0F, 62.0F};
 
     if (IsKeyPressed(KEY_ESCAPE) || IsButtonTriggered(backButton)) {
         app->screen = Screen::MainMenu;
@@ -854,9 +890,11 @@ void UpdateLoadCharacter(AppState *app) {
     }
 
     if (clickedIndex >= 0) {
-        EnsureCharacterHasHatsu(
-            &app->storedCharacters[static_cast<std::size_t>(clickedIndex)].character);
-        StartWorld(app, app->storedCharacters[static_cast<std::size_t>(clickedIndex)].character);
+        auto &loaded = app->storedCharacters[static_cast<std::size_t>(clickedIndex)].character;
+        EnsureCharacterHasHatsu(&loaded);
+        NEN_INFO("character loaded from save  name=%s  type=%s",
+                 loaded.name.c_str(), nen::ToString(loaded.naturalType).data());
+        StartWorld(app, loaded);
         app->statusMessage = "Loaded " + app->player.name + ".";
     }
 }
@@ -871,9 +909,9 @@ void UpdateQuiz(AppState *app) {
     const auto &question = questions[app->quizQuestionIndex];
 
     std::array<Rectangle, 3> optionRects{{
-        {86.0F, 312.0F, 920.0F, 62.0F},
-        {86.0F, 392.0F, 920.0F, 62.0F},
-        {86.0F, 472.0F, 920.0F, 62.0F},
+        {86.0F, 258.0F, 960.0F, 72.0F},
+        {86.0F, 340.0F, 960.0F, 72.0F},
+        {86.0F, 422.0F, 960.0F, 72.0F},
     }};
 
     int answerIndex = -1;
@@ -903,15 +941,15 @@ void UpdateQuiz(AppState *app) {
     }
 
     app->player = nen::Character{
-        .name = app->draftName,
-        .naturalType = nen::DetermineNenType(app->quizScores),
-        .auraPool = 180,
+        .name         = app->draftName,
+        .naturalType  = nen::DetermineNenType(app->quizScores),
+        .auraPool     = nen::AuraPool{.current = 180.0F},
+        .hatsuPotency = nen::GenerateHatsuPotency(app->draftName),
     };
-    EnsureCharacterHasHatsu(&app->player);
     app->hasCharacter = true;
-    app->revealTimer = 0.0F;
-    app->screen = Screen::Reveal;
-    app->statusMessage = "Divination complete. Continue to world.";
+    app->revealTimer  = 0.0F;
+    app->screen       = Screen::Reveal;
+    app->statusMessage = "Divination complete. Define your hatsu.";
 }
 
 void UpdateReveal(AppState *app, float dt) {
@@ -921,11 +959,253 @@ void UpdateReveal(AppState *app, float dt) {
         return;
     }
     if (IsKeyPressed(KEY_ENTER) || IsButtonTriggered(continueButton)) {
+        // Move to hatsu creation — user defines their ability
+        app->draftHatsuName.clear();
+        app->selectedHatsuCategoryIndex = 0;
+        app->selectedVowMask = 0;
+        app->screen = Screen::HatsuCreation;
+        app->statusMessage = "Name your hatsu and choose its nature.";
+    }
+}
+
+// ── Hatsu Creation ────────────────────────────────────────────────────────────
+
+// Natural affinity categories per type (2 highlighted per type)
+bool IsCategoryNatural(nen::Type type, nen::HatsuCategory cat) {
+    using C = nen::HatsuCategory;
+    using T = nen::Type;
+    switch (type) {
+    case T::Enhancer:   return cat == C::Projectile || cat == C::Passive;
+    case T::Transmuter: return cat == C::Counter    || cat == C::Control;
+    case T::Emitter:    return cat == C::Projectile || cat == C::Zone;
+    case T::Conjurer:   return cat == C::Summon     || cat == C::Zone;
+    case T::Manipulator:return cat == C::Control    || cat == C::Summon;
+    case T::Specialist: return true;  // all natural for Specialist
+    }
+    return false;
+}
+
+void UpdateHatsuCreation(AppState *app) {
+    if (IsKeyPressed(KEY_ESCAPE)) {
+        // Go back to reveal
+        app->screen = Screen::Reveal;
+        app->revealTimer = 1.5F;  // skip the intro pause
+        return;
+    }
+
+    HandleNameInput(&app->draftHatsuName);
+
+    // Category selection via number keys 1-6
+    if (IsKeyPressed(KEY_ONE))   { app->selectedHatsuCategoryIndex = 0; }
+    if (IsKeyPressed(KEY_TWO))   { app->selectedHatsuCategoryIndex = 1; }
+    if (IsKeyPressed(KEY_THREE)) { app->selectedHatsuCategoryIndex = 2; }
+    if (IsKeyPressed(KEY_FOUR))  { app->selectedHatsuCategoryIndex = 3; }
+    if (IsKeyPressed(KEY_FIVE))  { app->selectedHatsuCategoryIndex = 4; }
+    if (IsKeyPressed(KEY_SIX))   { app->selectedHatsuCategoryIndex = 5; }
+
+    // Category click hitboxes — 6 buttons in one row
+    constexpr float catY = 330.0F;
+    constexpr float catH = 64.0F;
+    constexpr float catW = 166.0F;
+    constexpr float catGap = 10.0F;
+    constexpr float catStartX = 86.0F;
+    for (int i = 0; i < 6; ++i) {
+        const Rectangle r{catStartX + static_cast<float>(i) * (catW + catGap), catY, catW, catH};
+        if (IsButtonTriggered(r)) {
+            app->selectedHatsuCategoryIndex = i;
+        }
+    }
+
+    // Vow toggles — two-column layout matching DrawHatsuCreation exactly
+    constexpr float vowStartY = 476.0F;
+    constexpr float vowH      = 28.0F;
+    constexpr float vowGap    = 4.0F;
+    constexpr float col2X     = 700.0F;
+    for (int i = 0; i < 12; ++i) {
+        const bool  inCol2 = i >= 6;
+        const float vx     = inCol2 ? col2X : 86.0F;
+        const float vy     = vowStartY + static_cast<float>(inCol2 ? i - 6 : i) * (vowH + vowGap);
+        const Rectangle checkRect{vx, vy + 4.0F, 16.0F, 16.0F};
+        if (IsButtonTriggered(checkRect)) {
+            const uint32_t bit = 1u << static_cast<uint32_t>(i);
+            const bool alreadyOn = (app->selectedVowMask & bit) != 0u;
+            if (alreadyOn) {
+                app->selectedVowMask &= ~bit;
+            } else {
+                // Max 2 vows
+                if (__builtin_popcount(app->selectedVowMask) < 2) {
+                    app->selectedVowMask |= bit;
+                } else {
+                    app->statusMessage = "Maximum 2 vows allowed.";
+                }
+            }
+        }
+    }
+
+    // Continue — y must match DrawHatsuCreation
+    const Rectangle continueBtn{86.0F, 754.0F, 320.0F, 62.0F};
+    if ((IsKeyPressed(KEY_ENTER) || IsButtonTriggered(continueBtn)) &&
+        !app->draftHatsuName.empty()) {
+        // Build HatsuSpec from user choices
+        const auto category =
+            static_cast<nen::HatsuCategory>(app->selectedHatsuCategoryIndex);
+        std::vector<int> vowIndices;
+        for (int i = 0; i < 12; ++i) {
+            if ((app->selectedVowMask & (1u << static_cast<uint32_t>(i))) != 0u) {
+                vowIndices.push_back(i);
+            }
+        }
+        app->player.hatsuName    = app->draftHatsuName;
+        app->player.hatsuPotency = nen::GenerateHatsuPotency(app->player.name);
+        NEN_INFO("hatsu defined  name=\"%s\"  category=%s  vows=%u  potency=%d",
+                 app->draftHatsuName.c_str(),
+                 nen::CategoryLabel(static_cast<nen::HatsuCategory>(
+                     app->selectedHatsuCategoryIndex)),
+                 static_cast<unsigned>(__builtin_popcount(app->selectedVowMask)),
+                 app->player.hatsuPotency);
+        app->cachedHatsuSpec = nen::BuildUserHatsuSpec(
+            app->draftHatsuName, app->player.naturalType,
+            app->player.hatsuPotency, category, vowIndices);
         StartWorld(app, app->player);
         SaveCurrentCharacter(app);
         RefreshStoredCharacters(app);
     }
 }
+
+void DrawHatsuCreation(const AppState &app) {
+    DrawRectangleGradientV(0, 0, kWidth, kHeight, {18, 27, 46, 255}, {10, 18, 33, 255});
+
+    const Color typeCol = TypeColor(app.player.naturalType);
+    DrawText("Design Your Hatsu", 86, 46, 48, RAYWHITE);
+    DrawText(TextFormat("You are a %s — choose the nature of your power.",
+                        nen::ToString(app.player.naturalType).data()),
+             86, 104, 24, typeCol);
+
+    // ── Hatsu name input ──────────────────────────────────────────────────
+    DrawText("Hatsu Name", 86, 152, 22, Fade(WHITE, 0.60F));
+    const Rectangle inputBox{86.0F, 178.0F, 540.0F, 60.0F};
+    DrawRectangleRounded(inputBox, 0.18F, 8, {24, 38, 64, 255});
+    DrawRectangleRoundedLinesEx(inputBox, 0.18F, 8, 2.0F, WHITE);
+    const bool cursorBlink = static_cast<int>(GetTime() * 2.0) % 2 == 0;
+    const std::string displayName = app.draftHatsuName + (cursorBlink ? "_" : " ");
+    DrawText(displayName.c_str(), 106, 198, 30, RAYWHITE);
+    if (app.draftHatsuName.empty()) {
+        DrawText("e.g. \"Crimson Bind Thread\"", 110, 200, 26, Fade(WHITE, 0.28F));
+    }
+
+    // ── Category selector ─────────────────────────────────────────────────
+    DrawText("Category  (1-6 keys or click)", 86, 302, 22, Fade(WHITE, 0.60F));
+    constexpr float catY      = 330.0F;
+    constexpr float catH      = 64.0F;
+    constexpr float catW      = 166.0F;
+    constexpr float catGap    = 10.0F;
+    constexpr float catStartX = 86.0F;
+    constexpr std::array<nen::HatsuCategory, 6> kCategories = {
+        nen::HatsuCategory::Projectile, nen::HatsuCategory::Zone,
+        nen::HatsuCategory::Control,    nen::HatsuCategory::Counter,
+        nen::HatsuCategory::Summon,     nen::HatsuCategory::Passive,
+    };
+    for (int i = 0; i < 6; ++i) {
+        const nen::HatsuCategory cat = kCategories[static_cast<std::size_t>(i)];
+        const Rectangle r{catStartX + static_cast<float>(i) * (catW + catGap), catY, catW, catH};
+        const bool selected = app.selectedHatsuCategoryIndex == i;
+        const bool natural  = IsCategoryNatural(app.player.naturalType, cat);
+        const bool hovered  = IsInside(r, GetMousePosition());
+
+        Color fill = selected ? Color{57, 87, 143, 255}
+                              : (hovered ? Color{40, 60, 100, 255} : Color{24, 38, 64, 255});
+        DrawRectangleRounded(r, 0.18F, 8, fill);
+        Color border = selected ? WHITE
+                                : (natural ? Fade(typeCol, 0.75F) : Fade(WHITE, 0.30F));
+        DrawRectangleRoundedLinesEx(r, 0.18F, 8, selected ? 2.5F : 1.5F, border);
+
+        DrawText(nen::CategoryLabel(cat),
+                 static_cast<int>(r.x + 10.0F), static_cast<int>(r.y + 8.0F), 20,
+                 selected ? RAYWHITE : (natural ? typeCol : LIGHTGRAY));
+        DrawText(nen::CategoryDescription(cat),
+                 static_cast<int>(r.x + 10.0F), static_cast<int>(r.y + 34.0F), 13,
+                 Fade(LIGHTGRAY, selected ? 0.9F : 0.55F));
+        if (natural) {
+            DrawText("*", static_cast<int>(r.x + catW - 16.0F),
+                     static_cast<int>(r.y + 6.0F), 16, Fade(typeCol, 0.85F));
+        }
+    }
+    DrawText("* = natural affinity for your type", 86, catY + catH + 6.0F, 16,
+             Fade(typeCol, 0.55F));
+
+    // ── Vow selector ──────────────────────────────────────────────────────
+    DrawText("Vows  (optional — pick 0-2 for a power bonus)",
+             86, 450.0F, 22, Fade(WHITE, 0.60F));
+
+    // Show all 12 vows in two columns
+    constexpr float vowStartY = 476.0F;
+    constexpr float vowH      = 28.0F;
+    constexpr float vowGap    = 4.0F;
+    constexpr float col2X     = 700.0F;
+
+    // The vow descriptions — must match kVowPool order in hatsu_spec.cpp
+    constexpr std::array<std::pair<std::string_view, float>, 12> kVowDisplay = {{
+        {"Cannot be used consecutively",           1.15F},
+        {"Requires physical contact to activate",  1.40F},
+        {"Only usable within 3m of target",        1.30F},
+        {"Cannot be used against fleeing targets", 1.20F},
+        {"Doubles aura cost in open terrain",      1.20F},
+        {"Only one active target at a time",       1.25F},
+        {"User cannot speak while active",         1.35F},
+        {"Cannot be canceled once started",        1.20F},
+        {"Activates only after being hit first",   1.50F},
+        {"Usable only three times per encounter",  1.45F},
+        {"Visible glow reveals user location",     1.30F},
+        {"Costs double when not at full health",   1.25F},
+    }};
+
+    for (int i = 0; i < 12; ++i) {
+        const bool inCol2 = i >= 6;
+        const float vx = inCol2 ? col2X : 86.0F;
+        const float vy = vowStartY + static_cast<float>(inCol2 ? i - 6 : i) * (vowH + vowGap);
+        const uint32_t bit     = 1u << static_cast<uint32_t>(i);
+        const bool    checked  = (app.selectedVowMask & bit) != 0u;
+        const Rectangle checkR{vx, vy + 4.0F, 16.0F, 16.0F};
+        DrawRectangle(static_cast<int>(checkR.x), static_cast<int>(checkR.y),
+                      static_cast<int>(checkR.width), static_cast<int>(checkR.height),
+                      checked ? Color{220, 180, 80, 255} : Color{30, 46, 76, 255});
+        DrawRectangleLines(static_cast<int>(checkR.x), static_cast<int>(checkR.y),
+                           static_cast<int>(checkR.width), static_cast<int>(checkR.height),
+                           Fade(WHITE, 0.40F));
+        const Color textCol = checked ? Color{220, 180, 80, 255} : Fade(WHITE, 0.65F);
+        DrawText(kVowDisplay[static_cast<std::size_t>(i)].first.data(),
+                 static_cast<int>(vx + 24.0F), static_cast<int>(vy + 5.0F), 16, textCol);
+        DrawText(TextFormat("x%.2f", kVowDisplay[static_cast<std::size_t>(i)].second),
+                 static_cast<int>(vx + 24.0F + 336.0F), static_cast<int>(vy + 5.0F), 16,
+                 Fade(textCol, 0.75F));
+    }
+
+    // Potency preview
+    {
+        const int   basePot  = app.player.hatsuPotency;
+        float       vowMult  = 1.0F;
+        for (int i = 0; i < 12; ++i) {
+            if ((app.selectedVowMask & (1u << static_cast<uint32_t>(i))) != 0u) {
+                vowMult *= kVowDisplay[static_cast<std::size_t>(i)].second;
+            }
+        }
+        const int finalPot = static_cast<int>(static_cast<float>(basePot) * vowMult);
+        DrawText(TextFormat("Potency: %d base  x%.2f vows  =  %d", basePot, vowMult, finalPot),
+                 86, 720.0F, 22, RAYWHITE);
+    }
+
+    // Continue button
+    const bool canContinue = !app.draftHatsuName.empty();
+    const Rectangle continueBtn{86.0F, 754.0F, 320.0F, 62.0F};
+    DrawButton(continueBtn, "Confirm Hatsu", false);
+    if (!canContinue) {
+        DrawText("Enter a name to continue.", 420, 772, 20, Fade(WHITE, 0.40F));
+    }
+
+    DrawText("ESC to go back", 86, 828.0F, 18, Fade(WHITE, 0.35F));
+}
+
+// ── End Hatsu Creation ────────────────────────────────────────────────────────
 
 Vector2 EnemyCenter(const AppState &app) { return app.enemy.position; }
 
@@ -1012,10 +1292,6 @@ Vector2 Normalize2D(Vector2 vector) {
 }
 
 void UpdateCombatCamera(AppState *app, float dt) {
-    if (!app->use3DView) {
-        return;
-    }
-
     const float wheel = GetMouseWheelMove();
     if (wheel != 0.0F) {
         app->cameraDistance = std::clamp(app->cameraDistance - wheel * 1.1F, 9.5F, 28.0F);
@@ -1097,15 +1373,23 @@ void UpdatePlayerMovement(AppState *app, float dt) {
 void RechargeAura(AppState *app, float dt) {
     const bool holdRecharge = IsKeyDown(KEY_R);
     app->chargingAura = holdRecharge;
-    if (!holdRecharge) {
+    if (!holdRecharge && app->cachedNenStats.regenMultiplier <= 0.0F) {
         return;
     }
 
-    app->chargeEffectTimer += dt;
-    const float typeBonus = app->player.naturalType == nen::Type::Enhancer ? 14.0F : 0.0F;
-    const int gain = static_cast<int>(std::floor((72.0F + typeBonus) * dt));
-    app->player.auraPool = std::min(kAuraMax, app->player.auraPool + std::max(1, gain));
-    app->statusMessage = "Channeling aura... hold R to recover.";
+    if (holdRecharge) {
+        app->chargeEffectTimer += dt;
+    }
+    const float typeBonus  = app->player.naturalType == nen::Type::Enhancer ? 14.0F : 0.0F;
+    const float baseRate   = app->player.auraPool.regenRate + typeBonus;
+    const float regenMult  = holdRecharge ? app->cachedNenStats.regenMultiplier
+                                          : app->cachedNenStats.regenMultiplier * 0.25F;
+    const float gain = baseRate * regenMult * dt;
+    app->player.auraPool.current = std::min(app->player.auraPool.max,
+                                            app->player.auraPool.current + gain);
+    if (holdRecharge) {
+        app->statusMessage = "Channeling aura... hold R to recover.";
+    }
 }
 
 void UpdateBaseTypeSelection(AppState *app) {
@@ -1129,8 +1413,10 @@ void ExecuteBaseAttack(AppState *app, Vector2 target) {
                          app->playerPosition.y + app->playerSize.y * 0.38F};
     const Vector2 aim = Normalize2D({target.x - origin.x, target.y - origin.y});
     app->facingDirection = aim;
-    const int damage =
+    const int rawDamage =
         nen::ComputeAttackDamage(app->player.naturalType, app->selectedBaseType, kBaseAttackPower);
+    const int damage = static_cast<int>(
+        std::round(static_cast<float>(rawDamage) * app->cachedNenStats.damageMultiplier));
     SpawnBaseAttack(&app->activeAttacks, app->selectedBaseType, origin, target, damage);
     app->statusMessage =
         "Base aura attack cast: " + std::string(nen::ToString(app->selectedBaseType)) + ".";
@@ -1142,11 +1428,13 @@ void ExecuteHatsu(AppState *app, Vector2 target) {
     const Vector2 aim = Normalize2D({target.x - origin.x, target.y - origin.y});
     app->facingDirection = aim;
     const int potency = std::max(70, app->player.hatsuPotency);
-    const int damage = static_cast<int>(
+    const float vowMult = nen::ComputeVowMultiplier(app->cachedHatsuSpec);
+    const int rawDamage = static_cast<int>(
         std::round(nen::ComputeAttackDamage(app->player.naturalType, app->player.naturalType,
                                             kHatsuAttackPower) *
-                   (static_cast<float>(potency) / 100.0F)));
-
+                   (static_cast<float>(potency) / 100.0F) * vowMult));
+    const int damage = static_cast<int>(
+        std::round(static_cast<float>(rawDamage) * app->cachedNenStats.damageMultiplier));
     SpawnHatsuAttack(&app->activeAttacks, app->player.naturalType, origin, target, damage);
     app->statusMessage = "Hatsu activated: " + app->player.hatsuName;
 }
@@ -1154,6 +1442,15 @@ void ExecuteHatsu(AppState *app, Vector2 target) {
 bool QueueAction(AppState *app, bool hatsu, Vector2 target) {
     if (app->queuedAction.queued) {
         app->statusMessage = "Action in progress.";
+        return false;
+    }
+
+    if (hatsu && !app->cachedNenStats.canUseHatsu) {
+        app->statusMessage = "Hatsu blocked — technique state prevents it.";
+        return false;
+    }
+    if (!hatsu && !app->cachedNenStats.canAttack) {
+        app->statusMessage = "Zetsu active — cannot attack.";
         return false;
     }
 
@@ -1315,6 +1612,7 @@ void ApplyAttackOutcome(AppState *app, const AttackOutcome &outcome) {
     app->enemy.health = std::max(0, app->enemy.health - damage);
     app->enemy.hitFlashTimer = 0.12F;
     app->statusMessage = "Hit for " + std::to_string(damage) + " damage.";
+    NEN_DEBUG("hit  dmg=%d  enemy_hp=%d/%d", damage, app->enemy.health, app->enemy.maxHealth);
 
     if (app->enemy.health > 0) {
         SaveCurrentCharacter(app);
@@ -1330,10 +1628,15 @@ void ApplyAttackOutcome(AppState *app, const AttackOutcome &outcome) {
     app->enemy.vulnerabilityTimer = 0.0F;
     app->enemy.elasticTimer = 0.0F;
     app->enemy.elasticStrength = 0.0F;
-    app->player.auraPool = std::min(kAuraMax, app->player.auraPool + 68);
+    app->player.auraPool.current = std::min(app->player.auraPool.max,
+                                            app->player.auraPool.current + 68.0F);
     app->statusMessage = "Enemy overwhelmed. +68 aura.";
+    NEN_INFO("enemy defeated  +68 aura  total=%.0f", app->player.auraPool.current);
     SaveCurrentCharacter(app);
 }
+
+// Forward declarations (defined further below with Draw* functions)
+void UpdateAuraParticles(AppState *app, float dt);
 
 void UpdateWorld(AppState *app) {
     const float dt = GetFrameTime();
@@ -1347,10 +1650,6 @@ void UpdateWorld(AppState *app) {
 
     app->baseAttackCooldown = std::max(0.0F, app->baseAttackCooldown - dt);
     app->hatsuCooldown = std::max(0.0F, app->hatsuCooldown - dt);
-    if (IsKeyPressed(KEY_TAB)) {
-        app->use3DView = !app->use3DView;
-        app->statusMessage = app->use3DView ? "3D view enabled." : "2D view enabled.";
-    }
     const bool scaleUpPressed =
         IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD) || IsKeyPressed(KEY_RIGHT_BRACKET);
     const bool scaleDownPressed =
@@ -1366,18 +1665,36 @@ void UpdateWorld(AppState *app) {
 
     UpdateBaseTypeSelection(app);
 
+    // Nen technique input
+    const nen::NenInputIntent nenIntent{
+        .holdZetsu = IsKeyDown(KEY_Z),
+        .holdRen   = IsKeyDown(KEY_E),
+        .toggleGyo = IsKeyPressed(KEY_G),
+        .holdEn    = IsKeyDown(KEY_N),
+        .armKo     = IsKeyDown(KEY_K),
+    };
+    const auto nenEvents = nen::UpdateNenState(app->player, nenIntent, dt);
+    app->cachedNenStats  = nen::ComputeNenStats(app->player);
+    for (const auto &ev : nenEvents) {
+        switch (ev) {
+        case nen::NenEvent::EnteredTen:   NEN_DEBUG("technique -> Ten");   break;
+        case nen::NenEvent::EnteredRen:   NEN_INFO("technique -> Ren");    break;
+        case nen::NenEvent::EnteredZetsu: NEN_INFO("technique -> Zetsu");  break;
+        case nen::NenEvent::KoArmed:      NEN_INFO("Ko armed");            break;
+        case nen::NenEvent::KoReleased:   NEN_INFO("Ko released");         break;
+        case nen::NenEvent::AuraDepletedWarning: NEN_WARN("aura low!  %.0f / %.0f",
+            app->player.auraPool.current, app->player.auraPool.max);      break;
+        default: break;
+        }
+    }
+
     RechargeAura(app, dt);
     UpdatePlayerMovement(app, dt);
 
     Vector2 target = EnemyCenter(*app);
-    if (app->use3DView) {
-        Vector2 arenaPoint;
-        if (MouseToArenaPoint(app->camera, &arenaPoint)) {
-            target = arenaPoint;
-        }
-    } else {
-        const Vector2 cursor = GetMousePosition();
-        target = IsInside(kArenaBounds, cursor) ? cursor : EnemyCenter(*app);
+    Vector2 arenaPoint;
+    if (MouseToArenaPoint(app->camera, &arenaPoint)) {
+        target = arenaPoint;
     }
 
     const bool baseCast = IsKeyPressed(KEY_SPACE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
@@ -1390,6 +1707,7 @@ void UpdateWorld(AppState *app) {
         QueueAction(app, true, target);
     }
 
+    UpdateAuraParticles(app, dt);
     UpdatePlayerAnimation(app, dt);
     UpdateQueuedAction(app, dt);
     MoveEnemy(app, dt);
@@ -1422,15 +1740,25 @@ void DrawMainMenu(const AppState &app) {
 
 void DrawNameEntry(const AppState &app) {
     DrawRectangleGradientV(0, 0, kWidth, kHeight, {18, 27, 46, 255}, {10, 18, 33, 255});
-    DrawText("Create New Hunter", 86, 70, 56, RAYWHITE);
-    DrawText("Enter character name", 86, 150, 30, LIGHTGRAY);
+    DrawText("Create New Hunter", 86, 60, 52, RAYWHITE);
+    DrawText("Your name determines your hatsu's identity.", 86, 126, 26, LIGHTGRAY);
 
-    DrawRectangleRounded({86.0F, 234.0F, 500.0F, 68.0F}, 0.2F, 8, {24, 38, 64, 255});
-    DrawRectangleRoundedLinesEx({86.0F, 234.0F, 500.0F, 68.0F}, 0.2F, 8, 2.0F, WHITE);
-    DrawText(app.draftName.c_str(), 106, 254, 34, RAYWHITE);
+    // Name input box
+    const Rectangle inputBox{86.0F, 188.0F, 540.0F, 66.0F};
+    DrawRectangleRounded(inputBox, 0.18F, 8, {24, 38, 64, 255});
+    DrawRectangleRoundedLinesEx(inputBox, 0.18F, 8, 2.0F, WHITE);
+    // Blinking cursor appended to draft name
+    const bool cursorVisible = static_cast<int>(GetTime() * 2.0) % 2 == 0;
+    const std::string displayName = app.draftName + (cursorVisible ? "_" : " ");
+    DrawText(displayName.c_str(), 106, 208, 34, RAYWHITE);
 
-    DrawButton({86.0F, 346.0F, 300.0F, 62.0F}, "Continue", false);
-    DrawButton({402.0F, 346.0F, 184.0F, 62.0F}, "Back", false);
+    DrawText("After the quiz, you will name your own hatsu.", 86, 278, 22, Fade(WHITE, 0.38F));
+
+    DrawButton({86.0F, 390.0F, 300.0F, 62.0F}, "Continue", false);
+    DrawButton({402.0F, 390.0F, 184.0F, 62.0F}, "Back", false);
+
+    DrawText("Up to 20 characters. Press Enter or click Continue.", 86, 470, 20,
+             Fade(WHITE, 0.40F));
 }
 
 void DrawLoadCharacter(const AppState &app) {
@@ -1453,7 +1781,7 @@ void DrawLoadCharacter(const AppState &app) {
 
         const auto &ch = app.storedCharacters[i].character;
         const std::string line = ch.name + " | " + std::string(nen::ToString(ch.naturalType)) +
-                                 " | aura " + std::to_string(ch.auraPool);
+                                 " | aura " + std::to_string(static_cast<int>(ch.auraPool.current));
         DrawText(line.c_str(), 96, y + 8, 24, RAYWHITE);
         y += 48;
     }
@@ -1461,43 +1789,78 @@ void DrawLoadCharacter(const AppState &app) {
 
 void DrawQuiz(const AppState &app) {
     const auto &questions = nen::PersonalityQuestions();
-    const auto &question = questions[app.quizQuestionIndex];
+    const auto &question  = questions[app.quizQuestionIndex];
     DrawRectangleGradientV(0, 0, kWidth, kHeight, {18, 27, 46, 255}, {10, 18, 33, 255});
 
-    DrawText("Nen Personality Assessment", 86, 66, 52, RAYWHITE);
-    DrawText(TextFormat("Question %d / %d", static_cast<int>(app.quizQuestionIndex + 1),
-                        static_cast<int>(questions.size())),
-             86, 132, 28, LIGHTGRAY);
+    DrawText("Nen Personality Assessment", 86, 54, 48, RAYWHITE);
 
-    DrawRectangleRounded({86.0F, 200.0F, 960.0F, 82.0F}, 0.15F, 6, {24, 38, 64, 255});
-    DrawText(question.prompt.data(), 110, 230, 30, RAYWHITE);
-
-    std::array<Rectangle, 3> optionRects{{
-        {86.0F, 312.0F, 920.0F, 62.0F},
-        {86.0F, 392.0F, 920.0F, 62.0F},
-        {86.0F, 472.0F, 920.0F, 62.0F},
-    }};
-
-    for (int i = 0; i < 3; ++i) {
-        DrawButton(optionRects[static_cast<std::size_t>(i)],
-                   std::to_string(i + 1) + ". " +
-                       std::string(question.options[static_cast<std::size_t>(i)].text),
-                   false);
+    // Progress bar
+    {
+        const int total    = static_cast<int>(questions.size());
+        const int current  = static_cast<int>(app.quizQuestionIndex);
+        constexpr float barX = 86.0F;
+        constexpr float barY = 112.0F;
+        constexpr float barW = 700.0F;
+        constexpr float barH = 8.0F;
+        DrawRectangle(static_cast<int>(barX), static_cast<int>(barY), static_cast<int>(barW),
+                      static_cast<int>(barH), {30, 46, 76, 255});
+        const float filled = barW * (static_cast<float>(current) / static_cast<float>(total));
+        DrawRectangle(static_cast<int>(barX), static_cast<int>(barY), static_cast<int>(filled),
+                      static_cast<int>(barH), {90, 160, 255, 200});
+        // Segment ticks
+        for (int i = 1; i < total; ++i) {
+            const float tx = barX + barW * (static_cast<float>(i) / static_cast<float>(total));
+            DrawLine(static_cast<int>(tx), static_cast<int>(barY),
+                     static_cast<int>(tx), static_cast<int>(barY + barH),
+                     Fade(WHITE, 0.25F));
+        }
+        DrawText(TextFormat("%d / %d", current + 1, total), static_cast<int>(barX + barW + 12),
+                 static_cast<int>(barY - 2), 20, LIGHTGRAY);
     }
+
+    // Question box with wrapped text
+    DrawRectangleRounded({86.0F, 138.0F, 960.0F, 96.0F}, 0.12F, 6, {24, 38, 64, 255});
+    DrawRectangleRoundedLinesEx({86.0F, 138.0F, 960.0F, 96.0F}, 0.12F, 6, 1.5F, Fade(WHITE, 0.4F));
+    DrawWrappedText(question.prompt, {108.0F, 158.0F, 920.0F, 76.0F}, 28, 1.0F, RAYWHITE, 2);
+
+    // Option buttons with wrapped labels
+    constexpr float optX = 86.0F;
+    constexpr float optW = 960.0F;
+    constexpr float optH = 72.0F;
+    constexpr float optGap = 86.0F;
+    for (int i = 0; i < 3; ++i) {
+        const float oy = 256.0F + static_cast<float>(i) * (optH + optGap - optH);
+        const Rectangle rect{optX, 258.0F + static_cast<float>(i) * 82.0F, optW, optH};
+        const bool hovered = IsInside(rect, GetMousePosition());
+        DrawRectangleRounded(rect, 0.12F, 8,
+                             hovered ? Color{57, 87, 143, 255} : Color{28, 44, 74, 255});
+        DrawRectangleRoundedLinesEx(rect, 0.12F, 8, hovered ? 2.0F : 1.5F,
+                                    hovered ? WHITE : Fade(WHITE, 0.45F));
+        const std::string label =
+            std::to_string(i + 1) + ".  " +
+            std::string(question.options[static_cast<std::size_t>(i)].text);
+        DrawWrappedText(label, {rect.x + 18.0F, rect.y + 14.0F, rect.width - 36.0F, 44.0F},
+                        24, 1.0F, RAYWHITE, 1);
+        (void)oy;
+    }
+
+    DrawText("Press 1/2/3 or click an option", 86, 512, 20, Fade(WHITE, 0.40F));
 }
 
 void DrawReveal(const AppState &app) {
     DrawRectangleGradientV(0, 0, kWidth, kHeight, {20, 29, 50, 255}, {12, 19, 36, 255});
-    DrawText("Water Divination", 86, 66, 54, RAYWHITE);
+    DrawText("Water Divination", 86, 52, 50, RAYWHITE);
     DrawText(TextFormat("%s is a %s!", app.player.name.c_str(),
                         nen::ToString(app.player.naturalType).data()),
-             86, 160, 48, WHITE);
-    DrawText(nen::WaterDivinationEffect(app.player.naturalType).data(), 86, 232, 30, LIGHTGRAY);
-    DrawText(TextFormat("Unique Hatsu: %s", app.player.hatsuName.c_str()), 86, 286, 30, RAYWHITE);
-    DrawText(
-        TextFormat("Special Ability: %s", nen::HatsuAbilityName(app.player.naturalType).data()), 86,
-        330, 28, LIGHTGRAY);
-    DrawText(nen::HatsuAbilityDescription(app.player.naturalType).data(), 86, 366, 24, LIGHTGRAY);
+             86, 116, 44, TypeColor(app.player.naturalType));
+    DrawText(nen::WaterDivinationEffect(app.player.naturalType).data(), 86, 174, 26, LIGHTGRAY);
+
+    DrawText(nen::HatsuAbilityName(app.player.naturalType).data(), 86, 216, 26, LIGHTGRAY);
+    DrawWrappedText(nen::HatsuAbilityDescription(app.player.naturalType),
+                    {86.0F, 250.0F, 820.0F, 52.0F}, 20, 1.0F, Fade(WHITE, 0.60F), 2);
+
+    DrawText("You will name and shape your hatsu on the next screen.",
+             86, 318, 22, Fade(WHITE, 0.42F));
 
     const Rectangle glass{980.0F, 166.0F, 280.0F, 430.0F};
     DrawRectangleRounded(glass, 0.06F, 8, Fade({51, 80, 132, 255}, 0.44F));
@@ -1551,76 +1914,6 @@ void DrawReveal(const AppState &app) {
     DrawButton({86.0F, 716.0F, 340.0F, 66.0F}, "Continue", false);
 }
 
-void DrawPlayer(const AppState &app) {
-    const Vector2 base{app.playerPosition.x, app.playerPosition.y};
-    const Color auraColor = TypeColor(app.player.naturalType);
-
-    if (app.chargingAura) {
-        const float t = app.chargeEffectTimer;
-        DrawCircleLines(base.x + 18.0F, base.y + 24.0F, 30.0F + std::sin(t * 5.5F) * 5.0F, WHITE);
-        DrawCircleLines(base.x + 18.0F, base.y + 24.0F, 42.0F + std::sin(t * 4.2F) * 5.0F,
-                        Fade(WHITE, 0.8F));
-    }
-
-    DrawCircle(base.x + 18.0F, base.y + 10.0F, 9.0F, {236, 226, 205, 255});
-    DrawRectangleRounded({base.x + 8.0F, base.y + 20.0F, 20.0F, 24.0F}, 0.3F, 6,
-                         {49, 75, 124, 255});
-    DrawLineEx({base.x + 8.0F, base.y + 28.0F}, {base.x - 1.0F, base.y + 40.0F}, 4.0F,
-               {228, 219, 204, 255});
-    DrawLineEx({base.x + 28.0F, base.y + 28.0F}, {base.x + 37.0F, base.y + 40.0F}, 4.0F,
-               {228, 219, 204, 255});
-    DrawRectangle(base.x + 9.0F, base.y + 44.0F, 7.0F, 10.0F, {218, 210, 194, 255});
-    DrawRectangle(base.x + 20.0F, base.y + 44.0F, 7.0F, 10.0F, {218, 210, 194, 255});
-    DrawCircleLines(base.x + 18.0F, base.y + 26.0F, 25.0F, Fade(auraColor, 0.65F));
-}
-
-void DrawEnemy(const AppState &app) {
-    const EnemyState &enemy = app.enemy;
-    const Color coreColor =
-        enemy.hitFlashTimer > 0.0F ? Color{255, 236, 178, 255} : Color{216, 105, 102, 255};
-    DrawCircleV(enemy.position, enemy.radius, {70, 37, 37, 255});
-    DrawCircleV(enemy.position, enemy.radius * 0.75F, coreColor);
-    DrawCircleLinesV(enemy.position, enemy.radius + 2.0F, Fade(WHITE, 0.85F));
-
-    if (enemy.manipulatedTimer > 0.0F) {
-        DrawCircleLines(enemy.position.x, enemy.position.y, enemy.radius + 10.0F,
-                        {255, 207, 108, 255});
-        DrawLineBezier({enemy.position.x - enemy.radius - 24.0F, enemy.position.y - 30.0F},
-                       {enemy.position.x + enemy.radius + 24.0F, enemy.position.y + 30.0F}, 2.6F,
-                       {255, 207, 108, 255});
-    }
-    if (enemy.vulnerabilityTimer > 0.0F) {
-        DrawCircleLines(enemy.position.x, enemy.position.y, enemy.radius + 16.0F,
-                        {255, 120, 205, 255});
-    }
-    if (enemy.elasticTimer > 0.0F) {
-        DrawCircleLines(enemy.position.x, enemy.position.y, enemy.radius + 22.0F,
-                        {133, 228, 255, 255});
-    }
-}
-
-void DrawElasticTether2D(const AppState &app) {
-    if (app.enemy.elasticTimer <= 0.0F) {
-        return;
-    }
-
-    const Vector2 player{
-        app.playerPosition.x + app.playerSize.x * 0.5F,
-        app.playerPosition.y + app.playerSize.y * 0.42F,
-    };
-    const Vector2 enemy = app.enemy.position;
-    const Vector2 direction = Normalize2D({enemy.x - player.x, enemy.y - player.y});
-    const Vector2 tangent{-direction.y, direction.x};
-    const float pulse = std::sin(static_cast<float>(GetTime()) * 8.0F) * 8.0F;
-    const Vector2 mid{
-        (player.x + enemy.x) * 0.5F + tangent.x * pulse,
-        (player.y + enemy.y) * 0.5F + tangent.y * pulse,
-    };
-
-    DrawLineBezier(player, mid, 4.5F, {133, 228, 255, 220});
-    DrawLineBezier(mid, enemy, 4.5F, {133, 228, 255, 220});
-    DrawCircleV(mid, 5.0F, {224, 247, 255, 220});
-}
 
 void DrawElasticTether3D(const AppState &app) {
     if (app.enemy.elasticTimer <= 0.0F) {
@@ -1656,37 +1949,40 @@ void DrawElasticTether3D(const AppState &app) {
 
 void DrawArena3D(const AppState &app) {
     (void)app;
-    const Vector3 center = ArenaToWorld(
+
+    // Large ground plane — dark stone
+    DrawPlane({0.0F, 0.0F, 0.0F}, {200.0F, 200.0F}, {22, 30, 46, 255});
+
+    // Arena boundary — glowing rectangle on the floor
+    const Vector3 arenaCenter = ArenaToWorld(
         {kArenaBounds.x + kArenaBounds.width * 0.5F, kArenaBounds.y + kArenaBounds.height * 0.5F});
-    const float width = kArenaBounds.width * kWorldScale;
-    const float depth = kArenaBounds.height * kWorldScale;
-    DrawPlane(center, {width, depth}, {26, 39, 66, 255});
+    const float hw = kArenaBounds.width  * kWorldScale * 0.5F;
+    const float hd = kArenaBounds.height * kWorldScale * 0.5F;
+    const float yFloor = 0.02F;
+    const Color borderGlow = {72, 132, 255, 200};
+    // Four edges of the arena boundary
+    DrawLine3D({arenaCenter.x - hw, yFloor, arenaCenter.z - hd},
+               {arenaCenter.x + hw, yFloor, arenaCenter.z - hd}, borderGlow);
+    DrawLine3D({arenaCenter.x + hw, yFloor, arenaCenter.z - hd},
+               {arenaCenter.x + hw, yFloor, arenaCenter.z + hd}, borderGlow);
+    DrawLine3D({arenaCenter.x + hw, yFloor, arenaCenter.z + hd},
+               {arenaCenter.x - hw, yFloor, arenaCenter.z + hd}, borderGlow);
+    DrawLine3D({arenaCenter.x - hw, yFloor, arenaCenter.z + hd},
+               {arenaCenter.x - hw, yFloor, arenaCenter.z - hd}, borderGlow);
 
-    const float wallH = 1.2F;
-    const float wallT = 0.2F;
-    DrawCube({center.x, wallH * 0.5F, center.z - depth * 0.5F}, width, wallH, wallT,
-             {32, 49, 81, 255});
-    DrawCube({center.x, wallH * 0.5F, center.z + depth * 0.5F}, width, wallH, wallT,
-             {32, 49, 81, 255});
-    DrawCube({center.x - width * 0.5F, wallH * 0.5F, center.z}, wallT, wallH, depth,
-             {32, 49, 81, 255});
-    DrawCube({center.x + width * 0.5F, wallH * 0.5F, center.z}, wallT, wallH, depth,
-             {32, 49, 81, 255});
-    DrawCubeWires({center.x, wallH * 0.5F, center.z}, width, wallH, depth, Fade(WHITE, 0.35F));
-
-    for (int i = 0; i < 11; ++i) {
+    // Subtle floor grid inside the arena
+    for (int i = 0; i <= 10; ++i) {
         const float t = static_cast<float>(i) / 10.0F;
-        const float z = center.z - depth * 0.5F + t * depth;
-        DrawLine3D({center.x - width * 0.5F + 0.2F, 0.02F, z},
-                   {center.x + width * 0.5F - 0.2F, 0.02F, z}, Fade(WHITE, 0.1F));
+        const float z = arenaCenter.z - hd + t * hd * 2.0F;
+        DrawLine3D({arenaCenter.x - hw + 0.1F, yFloor, z},
+                   {arenaCenter.x + hw - 0.1F, yFloor, z}, Fade(WHITE, 0.06F));
     }
-    for (int i = 0; i < 13; ++i) {
+    for (int i = 0; i <= 12; ++i) {
         const float t = static_cast<float>(i) / 12.0F;
-        const float x = center.x - width * 0.5F + t * width;
-        DrawLine3D({x, 0.02F, center.z - depth * 0.5F + 0.2F},
-                   {x, 0.02F, center.z + depth * 0.5F - 0.2F}, Fade(WHITE, 0.08F));
+        const float x = arenaCenter.x - hw + t * hw * 2.0F;
+        DrawLine3D({x, yFloor, arenaCenter.z - hd + 0.1F},
+                   {x, yFloor, arenaCenter.z + hd - 0.1F}, Fade(WHITE, 0.05F));
     }
-
 }
 
 void DrawAttackEffects3D(const AppState &app) {
@@ -1794,7 +2090,7 @@ void DrawPlayer3D(const AppState &app) {
     const Vector2 facing2 = Normalize2D(app.facingDirection);
     const Vector2 strideOffset2D{facing2.x * app.modelStrideOffset, facing2.y * app.modelStrideOffset};
     const Vector2 render2D{p2.x + strideOffset2D.x, p2.y + strideOffset2D.y};
-    const Vector3 anchor = ArenaToWorld(render2D, 0.75F + app.modelBobOffset);
+    const Vector3 anchor = ArenaToWorld(render2D, 0.0F + app.modelBobOffset);
     const Color aura = TypeColor(app.player.naturalType);
     const float animatedScale = app.playerModelScale * (1.0F + app.modelScalePulse);
 
@@ -1851,41 +2147,105 @@ void DrawPlayer3D(const AppState &app) {
     }
 }
 
+void UpdateAuraParticles(AppState *app, float dt) {
+    const nen::DerivedNenStats &stats = app->cachedNenStats;
+    const Color typeCol = TypeColor(app->player.naturalType);
+
+    // Spawn rate table
+    float spawnRate = 0.0F;
+    float alpha     = 0.0F;
+    float size      = 0.06F;
+    if (stats.auraVisibility >= 1.9F) {        // Ko armed
+        spawnRate = 30.0F;
+        alpha     = 0.85F;
+        size      = 0.14F;
+    } else if (stats.auraVisibility >= 1.4F) { // Ren
+        spawnRate = 18.0F;
+        alpha     = 0.55F;
+        size      = 0.11F;
+    } else if (stats.auraVisibility >= 0.5F) { // Ten
+        spawnRate = 3.0F;
+        alpha     = 0.22F;
+        size      = 0.06F;
+    }
+
+    // Advance existing particles
+    for (auto &p : app->auraParticles) {
+        p.lifetime += dt;
+        p.position.x += p.velocity.x * dt;
+        p.position.y += p.velocity.y * dt;
+        p.position.z += p.velocity.z * dt;
+        p.alpha = alpha * (1.0F - p.lifetime / p.maxLifetime);
+    }
+    app->auraParticles.erase(
+        std::remove_if(app->auraParticles.begin(), app->auraParticles.end(),
+                       [](const AuraParticle &p) { return p.lifetime >= p.maxLifetime; }),
+        app->auraParticles.end());
+
+    if (spawnRate <= 0.0F) {
+        return;
+    }
+
+    app->auraSpawnAccum += spawnRate * dt;
+    const Vector2 p2 = {app->playerPosition.x + app->playerSize.x * 0.5F,
+                         app->playerPosition.y + app->playerSize.y * 0.5F};
+    const Vector3 origin = ArenaToWorld(p2, 0.6F);
+
+    while (app->auraSpawnAccum >= 1.0F && app->auraParticles.size() < 400) {
+        app->auraSpawnAccum -= 1.0F;
+        const float angle =
+            static_cast<float>(GetRandomValue(0, 628)) * 0.01F;  // 0..2π approx
+        const float r = static_cast<float>(GetRandomValue(10, 50)) * 0.01F;
+        AuraParticle p{};
+        p.position   = {origin.x + std::cos(angle) * r, origin.y, origin.z + std::sin(angle) * r};
+        p.velocity   = {std::cos(angle) * 0.18F,
+                         0.28F + static_cast<float>(GetRandomValue(0, 30)) * 0.01F,
+                         std::sin(angle) * 0.18F};
+        p.size       = size;
+        p.alpha      = alpha;
+        p.lifetime   = 0.0F;
+        p.maxLifetime = 0.8F + static_cast<float>(GetRandomValue(0, 40)) * 0.01F;
+        p.color      = typeCol;
+        app->auraParticles.push_back(p);
+    }
+}
+
+void DrawAuraParticles(const AppState &app) {
+    for (const auto &p : app.auraParticles) {
+        if (p.alpha <= 0.01F) {
+            continue;
+        }
+        Color c = p.color;
+        c.a = static_cast<unsigned char>(std::clamp(p.alpha * 255.0F, 0.0F, 255.0F));
+        DrawSphere(p.position, p.size, c);
+    }
+}
+
+void DrawEnSphere(const AppState &app) {
+    if (app.cachedNenStats.detectionRadius <= 0.0F) {
+        return;
+    }
+    const Vector2 p2 = {app.playerPosition.x + app.playerSize.x * 0.5F,
+                         app.playerPosition.y + app.playerSize.y * 0.5F};
+    const Vector3 center = ArenaToWorld(p2, 0.0F);
+    const float r = app.cachedNenStats.detectionRadius;
+    DrawCircle3D(center, r, {1.0F, 0.0F, 0.0F}, 90.0F, Fade({133, 228, 255, 255}, 0.18F));
+    DrawCircle3D(center, r, {0.0F, 0.0F, 1.0F}, 0.0F,  Fade({133, 228, 255, 255}, 0.12F));
+    DrawSphereWires(center, r, 6, 6, Fade({133, 228, 255, 255}, 0.08F));
+}
+
 void DrawWorld(const AppState &app) {
     DrawRectangleGradientV(0, 0, kWidth, kHeight, {15, 24, 41, 255}, {8, 14, 27, 255});
 
-    if (app.use3DView) {
-        BeginMode3D(app.camera);
-        DrawArena3D(app);
-        DrawAttackEffects3D(app);
-        DrawElasticTether3D(app);
-        DrawEnemy3D(app);
-        DrawPlayer3D(app);
-        EndMode3D();
-        DrawText("3D Mode (TAB to toggle 2D)", static_cast<int>(kArenaBounds.x),
-                 static_cast<int>(kArenaBounds.y - 34.0F), 24, Fade(WHITE, 0.9F));
-    } else {
-        DrawRectangleRounded(kArenaBounds, 0.02F, 6, {18, 30, 50, 255});
-        DrawRectangleRoundedLinesEx(kArenaBounds, 0.02F, 6, 3.0F, Fade(WHITE, 0.65F));
-
-        for (int x = 0; x < 20; ++x) {
-            const float px = kArenaBounds.x + 14.0F + static_cast<float>(x) * 50.0F;
-            DrawLine(px, kArenaBounds.y + 10.0F, px, kArenaBounds.y + kArenaBounds.height - 10.0F,
-                     Fade(WHITE, 0.06F));
-        }
-        for (int y = 0; y < 14; ++y) {
-            const float py = kArenaBounds.y + 14.0F + static_cast<float>(y) * 50.0F;
-            DrawLine(kArenaBounds.x + 10.0F, py, kArenaBounds.x + kArenaBounds.width - 10.0F, py,
-                     Fade(WHITE, 0.06F));
-        }
-
-        DrawAttackEffects(app.activeAttacks);
-        DrawEnemy(app);
-        DrawPlayer(app);
-        DrawElasticTether2D(app);
-        DrawText("2D Mode (TAB for 3D)", static_cast<int>(kArenaBounds.x),
-                 static_cast<int>(kArenaBounds.y - 34.0F), 24, Fade(WHITE, 0.9F));
-    }
+    BeginMode3D(app.camera);
+    DrawArena3D(app);
+    DrawAttackEffects3D(app);
+    DrawElasticTether3D(app);
+    DrawEnemy3D(app);
+    DrawPlayer3D(app);
+    DrawAuraParticles(app);
+    DrawEnSphere(app);
+    EndMode3D();
 
     const float panelX = kArenaBounds.x + kArenaBounds.width + kSidebarMargin;
     const float panelY = kSidebarTop;
@@ -1895,101 +2255,220 @@ void DrawWorld(const AppState &app) {
     DrawRectangleRounded(panelRect, 0.03F, 6, {22, 34, 56, 255});
     DrawRectangleRoundedLinesEx(panelRect, 0.03F, 6, 2.0F, Fade(WHITE, 0.6F));
 
-    const float textX = panelX + 18.0F;
-    const float textW = panelW - 36.0F;
-    float y = panelY + 20.0F;
+    const float textX   = panelX + 14.0F;
+    const float textW   = panelW - 28.0F;
+    const float bottom  = panelY + panelH - 4.0F;
+    float y = panelY + 14.0F;
 
-    DrawText(TextFormat("Name: %s", app.player.name.c_str()), static_cast<int>(textX),
-             static_cast<int>(y), 28, RAYWHITE);
-    y += 36.0F;
+    // Clip all sidebar text to the panel bounds
+    BeginScissorMode(static_cast<int>(panelX + 2), static_cast<int>(panelY + 2),
+                     static_cast<int>(panelW - 4), static_cast<int>(panelH - 4));
+
+    // ── Character ──────────────────────────────────────────────────────────
+    DrawText(app.player.name.c_str(), static_cast<int>(textX), static_cast<int>(y), 22, RAYWHITE);
+    y += 24.0F;
     DrawText(TextFormat("Type: %s", nen::ToString(app.player.naturalType).data()),
-             static_cast<int>(textX), static_cast<int>(y), 28, RAYWHITE);
-    y += 36.0F;
-    DrawText(TextFormat("Aura: %d / %d", app.player.auraPool, kAuraMax), static_cast<int>(textX),
-             static_cast<int>(y), 28, RAYWHITE);
-    y += 40.0F;
-
-    y = DrawWrappedText(TextFormat("Hatsu: %s", app.player.hatsuName.c_str()), {textX, y, textW, 64.0F},
-                        24, 1.0F, LIGHTGRAY);
-    y = DrawWrappedText(TextFormat("Hatsu Skill: %s", nen::HatsuAbilityName(app.player.naturalType).data()),
-                        {textX, y + 2.0F, textW, 64.0F}, 24, 1.0F, LIGHTGRAY);
-    DrawText(TextFormat("Potency: %d", app.player.hatsuPotency), static_cast<int>(textX),
-             static_cast<int>(y + 6.0F), 24, LIGHTGRAY);
-    y += 34.0F;
-    DrawText(TextFormat("Base Type: %s", nen::ToString(app.selectedBaseType).data()),
-             static_cast<int>(textX), static_cast<int>(y), 24, LIGHTGRAY);
-    y += 30.0F;
-
-    DrawText(TextFormat("Model: %s", app.hasPlayerModel ? "Loaded" : "Fallback"),
-             static_cast<int>(textX), static_cast<int>(y), 24,
-             app.hasPlayerModel ? Color{150, 234, 170, 255} : Color{250, 190, 128, 255});
-    y += 26.0F;
-    DrawText(TextFormat("Model Scale: %.2f", app.playerModelScale), static_cast<int>(textX),
-             static_cast<int>(y), 18, Fade(WHITE, 0.72F));
+             static_cast<int>(textX), static_cast<int>(y), 20, TypeColor(app.player.naturalType));
     y += 22.0F;
-    const char *animMode = app.playerAnimationCount > 0 ? "clip" : "procedural";
-    DrawText(TextFormat("Anim Mode: %s (%s)", animMode, ToString(app.animationState)),
-             static_cast<int>(textX), static_cast<int>(y), 18, Fade(WHITE, 0.72F));
-    y += 22.0F;
-    y = DrawWrappedText(app.playerModelStatus, {textX, y, textW, 56.0F}, 17, 1.0F,
-                        Fade(WHITE, 0.72F), 2);
+
+    // Aura bar
+    {
+        const float barW   = textW;
+        const float barH   = 10.0F;
+        const float filled = barW * std::clamp(app.player.auraPool.current /
+                                               app.player.auraPool.max, 0.0F, 1.0F);
+        DrawRectangle(static_cast<int>(textX), static_cast<int>(y), static_cast<int>(barW),
+                      static_cast<int>(barH), {30, 46, 76, 255});
+        DrawRectangle(static_cast<int>(textX), static_cast<int>(y), static_cast<int>(filled),
+                      static_cast<int>(barH), Fade(TypeColor(app.player.naturalType), 0.85F));
+        DrawRectangleLines(static_cast<int>(textX), static_cast<int>(y), static_cast<int>(barW),
+                           static_cast<int>(barH), Fade(WHITE, 0.3F));
+        y += barH + 3.0F;
+        DrawText(TextFormat("Aura  %.0f / %.0f", app.player.auraPool.current,
+                             app.player.auraPool.max),
+                 static_cast<int>(textX), static_cast<int>(y), 16, Fade(WHITE, 0.80F));
+        y += 20.0F;
+    }
+
+    // ── Technique state ────────────────────────────────────────────────────
+    DrawLine(static_cast<int>(textX), static_cast<int>(y), static_cast<int>(textX + textW),
+             static_cast<int>(y), Fade(WHITE, 0.15F));
     y += 6.0F;
 
-    DrawText(TextFormat("Base CD: %.2fs", app.baseAttackCooldown), static_cast<int>(textX),
-             static_cast<int>(y), 24, LIGHTGRAY);
-    y += 30.0F;
-    DrawText(TextFormat("Hatsu CD: %.2fs", app.hatsuCooldown), static_cast<int>(textX),
-             static_cast<int>(y), 24, LIGHTGRAY);
-    y += 30.0F;
+    const nen::TechniqueState &tech = app.player.techniques;
+    const char *modeName = (tech.auraMode == nen::AuraMode::Zetsu) ? "Zetsu"
+                         : (tech.auraMode == nen::AuraMode::Ren)   ? "Ren"
+                                                                    : "Ten";
+    const Color modeColor = (tech.auraMode == nen::AuraMode::Zetsu) ? Color{200, 200, 200, 255}
+                          : (tech.auraMode == nen::AuraMode::Ren)   ? Color{255, 120, 80, 255}
+                                                                     : Color{120, 200, 255, 255};
+    DrawText(TextFormat("Mode: %s  Dmg x%.2f  Def x%.2f", modeName,
+                        app.cachedNenStats.damageMultiplier, app.cachedNenStats.defenseMultiplier),
+             static_cast<int>(textX), static_cast<int>(y), 16, modeColor);
+    y += 20.0F;
+
+    // Active overlays inline
+    {
+        std::string overlays;
+        if (tech.gyoActive) { overlays += "Gyo "; }
+        if (tech.enActive)  { overlays += "En "; }
+        if (tech.koPrepared) {
+            overlays += TextFormat("Ko:%.1fs ", tech.koCharge);
+        }
+        if (!overlays.empty()) {
+            DrawText(overlays.c_str(), static_cast<int>(textX), static_cast<int>(y), 16,
+                     {220, 220, 100, 255});
+            y += 20.0F;
+        }
+    }
+
+    // ── Hatsu ──────────────────────────────────────────────────────────────
+    DrawLine(static_cast<int>(textX), static_cast<int>(y), static_cast<int>(textX + textW),
+             static_cast<int>(y), Fade(WHITE, 0.15F));
+    y += 6.0F;
+
+    y = DrawWrappedText(app.player.hatsuName, {textX, y, textW, 44.0F}, 18, 1.0F, RAYWHITE, 2);
+    y = DrawWrappedText(nen::HatsuAbilityName(app.player.naturalType),
+                        {textX, y + 2.0F, textW, 22.0F}, 16, 1.0F, LIGHTGRAY, 1);
+    DrawText(TextFormat("Potency %d  |  Base: %s", app.player.hatsuPotency,
+                        nen::ToString(app.selectedBaseType).data()),
+             static_cast<int>(textX), static_cast<int>(y + 2.0F), 16, Fade(WHITE, 0.65F));
+    y += 22.0F;
+
+    // Vow constraints
+    if (!app.cachedHatsuSpec.vows.empty()) {
+        DrawText("Vows", static_cast<int>(textX), static_cast<int>(y), 16, {220, 180, 80, 255});
+        y += 18.0F;
+        for (const auto &vow : app.cachedHatsuSpec.vows) {
+            y = DrawWrappedText(vow.description, {textX + 6.0F, y, textW - 6.0F, 20.0F}, 15, 1.0F,
+                                Fade({220, 180, 80, 255}, 0.85F), 1);
+        }
+        DrawText(TextFormat("x%.2f potency", nen::ComputeVowMultiplier(app.cachedHatsuSpec)),
+                 static_cast<int>(textX), static_cast<int>(y), 15, Fade({220, 180, 80, 255}, 0.7F));
+        y += 18.0F;
+    }
+
+    // ── Model/Anim ─────────────────────────────────────────────────────────
+    DrawLine(static_cast<int>(textX), static_cast<int>(y), static_cast<int>(textX + textW),
+             static_cast<int>(y), Fade(WHITE, 0.15F));
+    y += 6.0F;
+
+    const Color modelStatusColor =
+        app.hasPlayerModel ? Color{150, 234, 170, 255} : Color{250, 190, 128, 255};
+    DrawText(TextFormat("Model: %s  Scale: %.2f", app.hasPlayerModel ? "OK" : "fallback",
+                        app.playerModelScale),
+             static_cast<int>(textX), static_cast<int>(y), 15, modelStatusColor);
+    y += 18.0F;
+    {
+        const char *animMode = app.playerAnimationCount > 0 ? "clip" : "proc";
+        DrawText(TextFormat("Anim: %s (%s)", animMode, ToString(app.animationState)),
+                 static_cast<int>(textX), static_cast<int>(y), 15, Fade(WHITE, 0.55F));
+        y += 18.0F;
+    }
+
+    // ── Combat ─────────────────────────────────────────────────────────────
+    DrawLine(static_cast<int>(textX), static_cast<int>(y), static_cast<int>(textX + textW),
+             static_cast<int>(y), Fade(WHITE, 0.15F));
+    y += 6.0F;
+
+    DrawText(TextFormat("CD  base %.2fs  hatsu %.2fs",
+                        app.baseAttackCooldown, app.hatsuCooldown),
+             static_cast<int>(textX), static_cast<int>(y), 16, LIGHTGRAY);
+    y += 20.0F;
     DrawText(TextFormat("Enemy HP: %d / %d", app.enemy.health, app.enemy.maxHealth),
-             static_cast<int>(textX), static_cast<int>(y), 24, LIGHTGRAY);
-    y += 30.0F;
+             static_cast<int>(textX), static_cast<int>(y), 16, LIGHTGRAY);
+    y += 20.0F;
 
     if (app.enemy.manipulatedTimer > 0.0F) {
-        DrawText(TextFormat("Manipulated: %.2fs", app.enemy.manipulatedTimer), static_cast<int>(textX),
-                 static_cast<int>(y), 24, {255, 210, 120, 255});
-        y += 30.0F;
+        DrawText(TextFormat("Manipulated %.1fs", app.enemy.manipulatedTimer),
+                 static_cast<int>(textX), static_cast<int>(y), 15, {255, 210, 120, 255});
+        y += 18.0F;
     }
     if (app.enemy.vulnerabilityTimer > 0.0F) {
-        DrawText(TextFormat("Vulnerable: %.2fs", app.enemy.vulnerabilityTimer), static_cast<int>(textX),
-                 static_cast<int>(y), 24, {255, 121, 210, 255});
-        y += 30.0F;
+        DrawText(TextFormat("Vulnerable %.1fs", app.enemy.vulnerabilityTimer),
+                 static_cast<int>(textX), static_cast<int>(y), 15, {255, 121, 210, 255});
+        y += 18.0F;
     }
     if (app.enemy.elasticTimer > 0.0F) {
-        DrawText(TextFormat("Elastic: %.2fs", app.enemy.elasticTimer), static_cast<int>(textX),
-                 static_cast<int>(y), 24, {133, 228, 255, 255});
-        y += 30.0F;
+        DrawText(TextFormat("Elastic %.1fs", app.enemy.elasticTimer),
+                 static_cast<int>(textX), static_cast<int>(y), 15, {133, 228, 255, 255});
+        y += 18.0F;
     }
 
-    DrawText("Hatsu Description", static_cast<int>(textX), static_cast<int>(y + 10.0F), 28, RAYWHITE);
-    y = DrawWrappedText(nen::HatsuAbilityDescription(app.player.naturalType),
-                        {textX, y + 44.0F, textW, 76.0F}, 20, 1.0F, LIGHTGRAY, 3);
-    y += 12.0F;
+    // ── Hatsu description ──────────────────────────────────────────────────
+    DrawLine(static_cast<int>(textX), static_cast<int>(y), static_cast<int>(textX + textW),
+             static_cast<int>(y), Fade(WHITE, 0.15F));
+    y += 6.0F;
 
-    DrawText("Controls", static_cast<int>(textX), static_cast<int>(y + 8.0F), 28, RAYWHITE);
-    y += 42.0F;
-    y = DrawWrappedText("Move: WASD / Arrows", {textX, y, textW, 28.0F}, 22, 1.0F, LIGHTGRAY);
-    y = DrawWrappedText("Base Attack: LMB or SPACE", {textX, y, textW, 28.0F}, 22, 1.0F, LIGHTGRAY);
-    y = DrawWrappedText("Select Base Type: 1..6", {textX, y, textW, 28.0F}, 22, 1.0F, LIGHTGRAY);
-    y = DrawWrappedText("Hatsu: RMB or Q | Recharge: Hold R", {textX, y, textW, 48.0F}, 22, 1.0F,
-                        LIGHTGRAY, 2);
-    y = DrawWrappedText("Camera: Hold MMB + drag orbit, mouse wheel zoom",
-                        {textX, y, textW, 52.0F}, 22, 1.0F, LIGHTGRAY, 2);
-    y = DrawWrappedText("TAB 2D/3D | +/- or [ ] model scale", {textX, y, textW, 48.0F}, 22, 1.0F,
-                        LIGHTGRAY, 2);
-    DrawWrappedText("Save: F5 | Back: ESC", {textX, y, textW, 28.0F}, 22, 1.0F, LIGHTGRAY);
+    DrawText("Hatsu", static_cast<int>(textX), static_cast<int>(y), 16, RAYWHITE);
+    y += 20.0F;
+    y = DrawWrappedText(nen::HatsuAbilityDescription(app.player.naturalType),
+                        {textX, y, textW, 48.0F}, 15, 1.0F, Fade(WHITE, 0.70F), 3);
+    y += 4.0F;
+
+    // ── Controls ───────────────────────────────────────────────────────────
+    DrawLine(static_cast<int>(textX), static_cast<int>(y), static_cast<int>(textX + textW),
+             static_cast<int>(y), Fade(WHITE, 0.15F));
+    y += 6.0F;
+
+    if (y < bottom - 20.0F) {
+        DrawText("Controls", static_cast<int>(textX), static_cast<int>(y), 16, RAYWHITE);
+        y += 20.0F;
+        const char *controlLines[] = {
+            "WASD move  |  LMB/SPC attack  |  RMB/Q hatsu",
+            "1-6 base type  |  R recharge aura",
+            "E Ren  Z Zetsu  G Gyo  N En  K Ko",
+            "MMB orbit  |  wheel zoom  |  +/- scale",
+            "F5 save  |  ESC back",
+        };
+        for (const char *line : controlLines) {
+            if (y >= bottom - 16.0F) { break; }
+            y = DrawWrappedText(line, {textX, y, textW, 18.0F}, 14, 1.0F,
+                                Fade(WHITE, 0.50F), 1);
+        }
+    }
+
+    EndScissorMode();
 }
 
 } // namespace
 
+// Redirect raylib's internal trace log through our logger.
+// Suppresses the verbose INFO flood (VAO uploads, texture IDs, etc.) and
+// formats WARN/ERROR lines consistently with the rest of the game output.
+void RaylibTraceCallback(int logLevel, const char *text, va_list args) {
+    char buf[512];
+    std::vsnprintf(buf, sizeof(buf), text, args);
+    switch (logLevel) {
+    case LOG_WARNING: NEN_WARN("[raylib] %s", buf); break;
+    case LOG_ERROR:   NEN_ERROR("[raylib] %s", buf); break;
+    // Silently drop LOG_INFO and LOG_DEBUG — too noisy for normal use.
+    // Change sMinLevel to Debug to see them.
+    default: break;
+    }
+}
+
 int Run() {
+    // Suppress raylib's own console spam; we handle WARN/ERROR via our callback.
+    SetTraceLogCallback(RaylibTraceCallback);
+    SetTraceLogLevel(LOG_WARNING);
+
+    NEN_INFO("nen_world starting up");
     InitWindow(kWidth, kHeight, "Nen World - Nen Combat Prototype");
     SetTargetFPS(60);
     SetExitKey(KEY_NULL);
 
     AppState app;
     TryLoadPlayerModel(&app);
+    if (app.hasPlayerModel) {
+        NEN_INFO("model loaded: %s  scale=%.4f", app.playerModelPath.c_str(),
+                 app.playerModelScale);
+    } else {
+        NEN_WARN("no character model found — using fallback geometry");
+    }
     RefreshStoredCharacters(&app);
+    NEN_INFO("save directory: %s  (%zu characters found)",
+             app.saveDir.string().c_str(), app.storedCharacters.size());
 
     bool running = true;
     while (running && !WindowShouldClose()) {
@@ -2011,6 +2490,9 @@ int Run() {
             break;
         case Screen::Reveal:
             UpdateReveal(&app, dt);
+            break;
+        case Screen::HatsuCreation:
+            UpdateHatsuCreation(&app);
             break;
         case Screen::World:
             UpdateWorld(&app);
@@ -2035,6 +2517,9 @@ int Run() {
             break;
         case Screen::Reveal:
             DrawReveal(app);
+            break;
+        case Screen::HatsuCreation:
+            DrawHatsuCreation(app);
             break;
         case Screen::World:
             DrawWorld(app);

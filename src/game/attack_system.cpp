@@ -24,23 +24,6 @@ Vector2 Rotate(Vector2 vector, float radians) {
     return {vector.x * c - vector.y * s, vector.x * s + vector.y * c};
 }
 
-Color AttackColor(nen::Type type) {
-    switch (type) {
-    case nen::Type::Enhancer:
-        return {108, 222, 120, 255};
-    case nen::Type::Transmuter:
-        return {79, 201, 255, 255};
-    case nen::Type::Emitter:
-        return {253, 117, 82, 255};
-    case nen::Type::Conjurer:
-        return {176, 140, 255, 255};
-    case nen::Type::Manipulator:
-        return {255, 195, 89, 255};
-    case nen::Type::Specialist:
-        return {255, 95, 191, 255};
-    }
-    return WHITE;
-}
 
 AttackEffect MakeEffect(nen::Type type, bool hatsu, Vector2 origin, Vector2 target,
                         Vector2 velocity, float radius, float life, int damage, float phase = 0.0F,
@@ -285,58 +268,6 @@ AttackOutcome UpdateAttackEffects(std::vector<AttackEffect> *effects, float dt,
                    effects->end());
 
     return outcome;
-}
-
-void DrawAttackEffects(const std::vector<AttackEffect> &effects) {
-    for (const auto &effect : effects) {
-        const float lifeRatio = 1.0F - (effect.lifetime / effect.maxLifetime);
-        const Color baseColor = AttackColor(effect.type);
-        const Color soft = Fade(baseColor, std::clamp(lifeRatio, 0.16F, 1.0F));
-        const float hatsuScale = effect.hatsu ? 1.25F : 1.0F;
-
-        switch (effect.type) {
-        case nen::Type::Enhancer:
-            DrawCircleLinesV(effect.position, effect.radius, soft);
-            DrawCircleV(effect.position, effect.radius * 0.38F,
-                        Fade(baseColor, 0.24F * hatsuScale));
-            break;
-        case nen::Type::Transmuter: {
-            const Vector2 direction = NormalizeSafe(effect.velocity);
-            const Vector2 start{effect.position.x - direction.x * 28.0F,
-                                effect.position.y - direction.y * 28.0F};
-            const Vector2 end{effect.position.x + direction.x * 12.0F,
-                              effect.position.y + direction.y * 12.0F};
-            DrawLineEx(start, end, 4.2F * hatsuScale, soft);
-            DrawCircleV(effect.position, effect.radius, Fade(baseColor, 0.55F));
-            break;
-        }
-        case nen::Type::Emitter:
-            DrawCircleV(effect.position, effect.radius * 1.65F, Fade(baseColor, 0.18F));
-            DrawCircleV(effect.position, effect.radius, soft);
-            DrawCircleLinesV(effect.position, effect.radius * 2.0F, Fade(baseColor, 0.35F));
-            break;
-        case nen::Type::Conjurer:
-            DrawPoly(effect.position, 4, effect.radius * 1.7F, effect.phase * 320.0F, soft);
-            DrawPolyLinesEx(effect.position, 4, effect.radius * 1.7F, effect.phase * 320.0F, 2.0F,
-                            WHITE);
-            break;
-        case nen::Type::Manipulator: {
-            DrawCircleV(effect.position, effect.radius, soft);
-            const float orbit = effect.radius * 1.9F;
-            DrawCircle(effect.position.x + std::cos(effect.phase * 7.0F) * orbit,
-                       effect.position.y + std::sin(effect.phase * 7.0F) * orbit, 3.2F,
-                       Fade(baseColor, 0.9F));
-            DrawCircle(effect.position.x + std::cos(effect.phase * 7.0F + PI) * orbit,
-                       effect.position.y + std::sin(effect.phase * 7.0F + PI) * orbit, 3.2F,
-                       Fade(baseColor, 0.8F));
-            break;
-        }
-        case nen::Type::Specialist:
-            DrawPoly(effect.position, 6, effect.radius * 1.9F, effect.phase * 260.0F, soft);
-            DrawCircleV(effect.position, effect.radius * 0.75F, Fade(baseColor, 0.85F));
-            break;
-        }
-    }
 }
 
 } // namespace game
